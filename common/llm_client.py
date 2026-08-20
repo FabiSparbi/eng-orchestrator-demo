@@ -2,11 +2,13 @@
 
 ONE model deployment backs all four agents. Every agent module does:
 
-    from common.llm_client import shared_chat_client
+    from common.llm_client import get_shared_chat_client
 
-and passes it as `client=` when constructing its Agent. No agent file
-constructs a chat client of its own -- that is the whole point of this module,
-and it is what the design brief means by "single LLM endpoint".
+and passes the result as `client=` when constructing its Agent. The result is
+cached, so all four agents share ONE client against ONE Foundry model
+deployment. No agent file constructs a chat client of its own -- that is the
+whole point of this module, and it is what the design brief means by "single
+LLM endpoint".
 
 Auth uses DefaultAzureCredential, so `az login` works locally and a managed
 identity works unchanged once these agents are hosted in Foundry.
@@ -83,30 +85,6 @@ def get_shared_chat_client() -> FoundryChatClient:
         model=model,
         credential=DefaultAzureCredential(),
     )
-
-
-class _LazyChatClient:
-    """Import-time-safe proxy around the shared client.
-
-    Agent modules are imported by DevUI at startup and by the unit tests, which
-    must not require Azure credentials just to import a module. Constructing the
-    real client is deferred to first attribute access, so a missing env var
-    surfaces as a clear error when an agent actually runs, not as an import
-    crash in the test suite.
-    """
-
-    def __getattr__(self, item: str):
-        return getattr(get_shared_chat_client(), item)
-
-    def __repr__(self) -> str:
-        endpoint = _first_env(ENDPOINT_VARS)
-        model = _first_env(MODEL_VARS)
-        state = f"endpoint={endpoint!r}, model={model!r}" if endpoint else "unconfigured"
-        return f"<shared FoundryChatClient proxy: {state}>"
-
-
-# What every agent module imports.
-shared_chat_client = _LazyChatClient()
 
 
 def describe_configuration() -> dict[str, str | bool | None]:
