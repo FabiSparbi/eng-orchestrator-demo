@@ -1,213 +1,211 @@
-"""Fine search: mocked engineering-drawing analysis.
+"""Fine search: soft-foot detection from drawing OCR text.
 
-Stands in for a vision model reading a 2D drawing (or a feature-recognition
-pass over CAD) to extract mounting geometry that ePLM attribute search cannot
-see. Coarse search narrows the field on material/weight/date; this step decides
-whether a candidate actually bolts into the same place.
+The coarse KVS search filters on catalog attributes and can say nothing about
+features. This step processes each candidate's drawing and decides whether the
+part has a SOFT FOOT.
 
-PRODUCTION SWAP-IN: replace the fixtures below with a call to a vision-capable
-model over the drawing PDF/TIFF referenced by `drawingRef`, or with a CAD
-feature-recognition service. Keep the return shape and everything downstream
-(ranking, agent instructions) still works.
+THE RULE
+--------
+A soft foot means the part has a tailored hardness profile: the upper section
+is fully hardened while the foot area is left soft for crash and joining
+behaviour. On the drawing that shows up as TWO OR MORE DIFFERENT HV callouts.
+A part with a single uniform hardness value does not have a soft foot.
+
+This is applied deterministically, in code, by `evaluate_soft_foot`. In a
+production system the OCR text would instead be handed to a general-purpose LLM
+along with a description of this rule; that is an explicit later step, and the
+rule lives in one function here so it can be swapped for that call.
+
+COST
+----
+Fine search is the expensive stage: one drawing fetch plus one OCR pass per
+part. `run_fine_search` simulates that latency (about a second per part, capped
+so the whole batch stays well under ten seconds). Set FINE_SEARCH_DELAY_S=0 to
+disable it -- the test suite does.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
-import random
+import os
+import re
 from pathlib import Path
 from typing import Any
 
-CATALOG_PATH = Path(__file__).resolve().parent.parent / "mock_data" / "eplm_catalog.json"
+from mock_data.drawing_ocr import get_drawing_ocr
 
-# Per-part "what the drawing shows". Hand-authored so the demo story holds:
-# BR-3310 and BR-5501 are genuine drop-in candidates for BR-2201; BR-4120 is
-# lighter but has a different bolt pattern, which is exactly the kind of thing
-# coarse attribute search cannot catch.
-_DRAWING_FIXTURES: dict[str, dict[str, Any]] = {
-    "BR-2201": {
-        "hole_count": 4,
-        "mounting_pattern": "4x M10 on 120x80 mm rectangular pitch",
-        "distinguishing_features": ["stiffening rib along load path", "45 deg chamfered outboard edge", "drain notch"],
-        "confidence": 0.94,
-    },
-    "BR-3310": {
-        "hole_count": 4,
-        "mounting_pattern": "4x M10 on 120x80 mm rectangular pitch",
-        "distinguishing_features": ["twin stiffening ribs", "weight-relief pocket", "45 deg chamfered outboard edge"],
-        "confidence": 0.91,
-    },
-    "BR-3412": {
-        "hole_count": 4,
-        "mounting_pattern": "4x M10 on 120x82 mm rectangular pitch",
-        "distinguishing_features": ["single deep rib", "no drain notch"],
-        "confidence": 0.88,
-    },
-    "BR-4120": {
-        "hole_count": 3,
-        "mounting_pattern": "3x M12 on 100 mm triangular pitch",
-        "distinguishing_features": ["cast lattice web", "integrated sensor boss"],
-        "confidence": 0.79,
-    },
-    "BR-2890": {
-        "hole_count": 5,
-        "mounting_pattern": "5x M10 irregular pitch, damper-specific",
-        "distinguishing_features": ["damper eye interface", "welded gusset"],
-        "confidence": 0.86,
-    },
-    "BR-5501": {
-        "hole_count": 4,
-        "mounting_pattern": "4x M10 on 120x80 mm rectangular pitch",
-        "distinguishing_features": ["cast rib network", "machined mating face", "drain notch"],
-        "confidence": 0.89,
-    },
-    "BR-6002": {
-        "hole_count": 6,
-        "mounting_pattern": "6x M8 on 140x60 mm rectangular pitch",
-        "distinguishing_features": ["extruded profile section", "end-milled interfaces"],
-        "confidence": 0.83,
-    },
-    "BR-7150": {
-        "hole_count": 4,
-        "mounting_pattern": "4x M8 on 150x90 mm rectangular pitch",
-        "distinguishing_features": ["tray location pins", "thermal isolation pad seat"],
-        "confidence": 0.87,
-    },
-    "BR-8021": {
-        "hole_count": 4,
-        "mounting_pattern": "4x M10 on 120x80 mm rectangular pitch (bonded inserts)",
-        "distinguishing_features": ["bonded metal inserts", "laminate ply drop-offs"],
-        "confidence": 0.68,
-    },
-    "BR-1180": {
-        "hole_count": 4,
-        "mounting_pattern": "4x M12 on 160x100 mm rectangular pitch",
-        "distinguishing_features": ["heavy cast boss", "legacy datum scheme"],
-        "confidence": 0.72,
-    },
-}
+CATALOG_PATH = Path(__file__).resolve().parent.parent / "mock_data" / "kvs_catalog.json"
 
-_rng = random.Random(4711)
+SOFT_FOOT_RULE = (
+    "A drawing showing two or more different HV hardness values indicates a "
+    "tailored hardness profile, i.e. a soft foot. A single uniform HV value "
+    "means no soft foot."
+)
+
+# Matches "480 +/- 30 HV10", "200 HV 10", "480HV" and similar.
+_HV_PATTERN = re.compile(r"(\d{2,4})\s*(?:\+/-\s*\d+\s*)?HV\s*\d*", re.IGNORECASE)
+
+# Per-part simulated cost of fetching a drawing from KVS and OCR-ing it.
+_DEFAULT_DELAY_S = 1.0
+# Hard ceiling on a whole fine-search batch, so a demo never stalls.
+MAX_FINE_SEARCH_SECONDS = 9.0
 
 
-def _catalog_record(part_number: str) -> dict[str, Any] | None:
+def _catalog_index() -> dict[str, dict[str, Any]]:
+    """Part master data, keyed by part number.
+
+    The fine search reports each candidate with its catalog attributes next to
+    the drawing verdict, so the engineer sees one complete table instead of
+    having to join two tool outputs by hand. In production this metadata comes
+    back from the KVS record fetched alongside the drawing.
+    """
     with CATALOG_PATH.open(encoding="utf-8") as fh:
-        for part in json.load(fh)["parts"]:
-            if part["partNumber"].upper() == part_number.strip().upper():
-                return part
-    return None
+        return {p["partNumber"].upper(): p for p in json.load(fh)["parts"]}
 
 
-def analyze_drawing(part_number: str) -> dict[str, Any]:
-    """Extract mounting geometry from a part's engineering drawing.
+def _delay_per_part() -> float:
+    raw = os.environ.get("FINE_SEARCH_DELAY_S")
+    if raw is None:
+        return _DEFAULT_DELAY_S
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return _DEFAULT_DELAY_S
 
-    Fine-search step: reads the drawing referenced by the ePLM record and
-    reports the mounting interface, so candidates can be compared on whether
-    they physically fit -- something the coarse attribute search cannot do.
+
+def extract_hv_values(ocr_text: list[str]) -> list[int]:
+    """Return every distinct HV hardness value found in OCR text, in order."""
+    values: list[int] = []
+    for line in ocr_text:
+        for match in _HV_PATTERN.finditer(line):
+            value = int(match.group(1))
+            if value not in values:
+                values.append(value)
+    return values
+
+
+def evaluate_soft_foot(ocr_text: list[str]) -> dict[str, Any]:
+    """Apply the soft-foot rule to a drawing's OCR text.
 
     Args:
-        part_number: ePLM part number, e.g. "BR-2201".
+        ocr_text: The OCR'd lines of the drawing.
 
     Returns:
-        Hole count, mounting pattern description, distinguishing features and
-        an extraction confidence in [0, 1].
+        The verdict, the HV values found, and the exact lines they came from so
+        the decision can be checked against the drawing.
     """
-    pn = part_number.strip().upper()
-    record = _catalog_record(pn)
-    fixture = _DRAWING_FIXTURES.get(pn)
+    values = extract_hv_values(ocr_text)
+    evidence = [line for line in ocr_text if _HV_PATTERN.search(line)]
+    has_soft_foot = len(values) >= 2
 
-    if fixture is None:
-        # Unknown part: report low confidence rather than inventing geometry.
-        return {
-            "partNumber": pn,
-            "drawingRef": record["drawingRef"] if record else None,
-            "hole_count": None,
-            "mounting_pattern": "unknown -- no drawing available",
-            "distinguishing_features": [],
-            "confidence": 0.0,
-            "note": "No drawing on file for this part number (mock analysis).",
-        }
+    if has_soft_foot:
+        reason = (
+            f"{len(values)} different hardness values found ({', '.join(f'{v} HV' for v in values)}) "
+            "-> tailored hardness profile -> soft foot."
+        )
+    elif values:
+        reason = f"Only one hardness value found ({values[0]} HV) -> uniform hardening -> no soft foot."
+    else:
+        reason = "No HV hardness callout found on the drawing -> soft foot cannot be established."
 
     return {
-        "partNumber": pn,
-        "drawingRef": record["drawingRef"] if record else None,
-        "hole_count": fixture["hole_count"],
-        "mounting_pattern": fixture["mounting_pattern"],
-        "distinguishing_features": list(fixture["distinguishing_features"]),
-        "confidence": round(min(1.0, fixture["confidence"] + _rng.uniform(-0.02, 0.02)), 3),
-        "source": "drawing analysis (mock vision extraction)",
+        "hasSoftFoot": has_soft_foot,
+        "hvValues": values,
+        "evidence": evidence,
+        "reason": reason,
+        "rule": SOFT_FOOT_RULE,
     }
 
 
-def compare_mounting_interfaces(reference_part: str, candidate_part: str) -> dict[str, Any]:
-    """Compare two parts' mounting interfaces from their drawings.
+def analyze_drawing(part_number: str, drawing_ref: str | None = None) -> dict[str, Any]:
+    """Fetch, OCR and evaluate ONE part's drawing.
 
-    Use after `analyze_drawing` to judge whether a candidate is a drop-in
-    replacement for the reference part.
+    Use this when the engineer asks about a single specific part. For screening
+    a batch of candidates from the coarse search, use `run_fine_search`.
 
     Args:
-        reference_part: The part currently in the design, e.g. "BR-2201".
-        candidate_part: The proposed alternative, e.g. "BR-3310".
+        part_number: KVS part number, e.g. "10A.507.109".
+        drawing_ref: Optional drawing reference from the KVS record.
 
     Returns:
-        A match verdict ("exact", "similar", "different"), a 0-1 geometric
-        match score, and the specific differences found.
+        The soft-foot verdict with the HV evidence, plus OCR metadata.
     """
-    ref = analyze_drawing(reference_part)
-    cand = analyze_drawing(candidate_part)
-
-    if ref["hole_count"] is None or cand["hole_count"] is None:
-        return {
-            "referencePart": ref["partNumber"],
-            "candidatePart": cand["partNumber"],
-            "mountingPatternMatch": "unknown",
-            "geometricMatchScore": 0.0,
-            "differences": ["Drawing data missing for at least one part."],
-            "confidence": 0.0,
-        }
-
-    differences: list[str] = []
-    score = 1.0
-
-    if ref["hole_count"] != cand["hole_count"]:
-        differences.append(
-            f"Hole count differs: reference has {ref['hole_count']}, candidate has {cand['hole_count']}."
-        )
-        score -= 0.45
-
-    ref_pattern = ref["mounting_pattern"]
-    cand_pattern = cand["mounting_pattern"]
-    if ref_pattern != cand_pattern:
-        # Same thread size and roughly the same pitch is a "similar" fit.
-        ref_thread = ref_pattern.split()[1] if len(ref_pattern.split()) > 1 else ""
-        cand_thread = cand_pattern.split()[1] if len(cand_pattern.split()) > 1 else ""
-        if ref_thread == cand_thread:
-            differences.append(f"Pitch differs slightly: '{ref_pattern}' vs '{cand_pattern}'.")
-            score -= 0.15
-        else:
-            differences.append(f"Fastener size differs: '{ref_pattern}' vs '{cand_pattern}'.")
-            score -= 0.35
-
-    shared = set(ref["distinguishing_features"]) & set(cand["distinguishing_features"])
-    missing = set(ref["distinguishing_features"]) - set(cand["distinguishing_features"])
-    if missing:
-        differences.append("Features absent on candidate: " + ", ".join(sorted(missing)) + ".")
-        score -= 0.05 * len(missing)
-
-    score = round(max(0.0, min(1.0, score)), 3)
-    if score >= 0.9:
-        verdict = "exact"
-    elif score >= 0.6:
-        verdict = "similar"
-    else:
-        verdict = "different"
-
+    ocr = get_drawing_ocr(part_number, drawing_ref)
+    verdict = evaluate_soft_foot(ocr["ocrText"])
     return {
-        "referencePart": ref["partNumber"],
-        "candidatePart": cand["partNumber"],
-        "mountingPatternMatch": verdict,
-        "geometricMatchScore": score,
-        "sharedFeatures": sorted(shared),
-        "differences": differences or ["No geometric differences detected."],
-        "confidence": round(min(ref["confidence"], cand["confidence"]), 3),
+        "partNumber": ocr["partNumber"],
+        "drawingRef": ocr["drawingRef"],
+        "scanQualityPct": ocr["scanQualityPct"],
+        "hasSoftFoot": verdict["hasSoftFoot"],
+        "hvValues": verdict["hvValues"],
+        "evidence": verdict["evidence"],
+        "reason": verdict["reason"],
+        "ocrText": ocr["ocrText"],
+        "method": "drawing retrieved from KVS (mock) + OCR (mock) + rule-based evaluation",
+    }
+
+
+async def run_fine_search(part_numbers: list[str]) -> dict[str, Any]:
+    """Screen a batch of candidate parts for the soft-foot feature.
+
+    This is the expensive stage: every part's drawing is retrieved from KVS and
+    OCR'd before the rule is applied. Pass the part numbers returned by the
+    coarse KVS search.
+
+    Args:
+        part_numbers: KVS part numbers to screen, e.g. ["10A.507.109", ...].
+
+    Returns:
+        Every screened part with its soft-foot verdict and HV evidence, plus a
+        summary naming which parts qualify. Parts are NOT filtered out -- the
+        engineer sees the full list with each verdict and picks one.
+    """
+    parts = [pn.strip().upper() for pn in part_numbers if pn and pn.strip()]
+    if not parts:
+        return {"error": "No part numbers given to screen.", "screened": []}
+
+    # Spread the simulated cost across the batch, under the hard ceiling.
+    per_part = _delay_per_part()
+    if per_part * len(parts) > MAX_FINE_SEARCH_SECONDS:
+        per_part = MAX_FINE_SEARCH_SECONDS / len(parts)
+
+    catalog = _catalog_index()
+    screened: list[dict[str, Any]] = []
+    for part_number in parts:
+        if per_part:
+            await asyncio.sleep(per_part)
+        result = analyze_drawing(part_number)
+        record = catalog.get(result["partNumber"], {})
+        screened.append(
+            {
+                "partNumber": result["partNumber"],
+                "name": record.get("name"),
+                "vehicleModel": record.get("vehicleModel"),
+                "weightKg": record.get("weightKg"),
+                "createdDate": record.get("createdDate"),
+                "materialGrade": record.get("materialGrade"),
+                "status": record.get("status"),
+                "drawingRef": result["drawingRef"],
+                "hasSoftFoot": result["hasSoftFoot"],
+                "hvValues": result["hvValues"],
+                "evidence": result["evidence"],
+                "reason": result["reason"],
+                "scanQualityPct": result["scanQualityPct"],
+            }
+        )
+
+    screened.sort(key=lambda p: (not p["hasSoftFoot"], p["weightKg"] if p["weightKg"] is not None else 999))
+    qualifying = [p["partNumber"] for p in screened if p["hasSoftFoot"]]
+    return {
+        "screenedCount": len(screened),
+        "approxSecondsSpent": round(per_part * len(parts), 1),
+        "rule": SOFT_FOOT_RULE,
+        "screened": screened,
+        "partsWithSoftFoot": qualifying,
+        "summary": (
+            f"Screened {len(screened)} drawing(s); {len(qualifying)} have a soft foot"
+            + (f": {', '.join(qualifying)}." if qualifying else ".")
+        ),
+        "note": "Every screened part is listed with its verdict so the engineer can review and choose.",
     }

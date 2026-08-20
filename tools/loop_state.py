@@ -1,9 +1,25 @@
 """Deterministic loop / session state for the design-iteration loop.
 
 The orchestrator must NOT be trusted to count iterations in its own head across
-turns -- it will drift. These tools own the count and the termination decision
-in code, implementing the brief's four termination conditions exactly:
+turns -- it will drift. These tools own the count and the continue/stop/wait
+decision in code.
 
+THREE OUTCOMES, NOT TWO
+-----------------------
+A stamping simulation flags regions the agent can fix and regions only a CAD
+engineer can. So "stop" is not one state but two, and the orchestrator must be
+able to tell them apart:
+
+  * shouldContinue = True                  -> agent-fixable work remains; loop.
+  * blockedOn = "manual_cad_rework"        -> nothing left the agent can fix,
+                                              but critical regions remain. The
+                                              loop is NOT over: prompt the
+                                              engineer to rework them in CATIA
+                                              and report back.
+  * terminated = True                      -> the loop is genuinely finished;
+                                              `terminationReason` says why.
+
+Termination reasons implement the brief's four conditions:
   1. no critical regions remain            -> "converged"
   2. max iterations reached (default 5)    -> "max_iterations_reached"
   3. user cancels                          -> "user_cancelled"
@@ -25,6 +41,7 @@ from mock_data import digital_twin as twin
 from tools.simulation_tools import get_analysis_overview
 
 DEFAULT_MAX_ITERATIONS = 5
+DEFAULT_ANALYSIS = "stamping"
 
 _SESSIONS: dict[str, dict[str, Any]] = {}
 
@@ -37,7 +54,7 @@ def start_design_loop(
     part_id: str,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     goal: str | None = None,
-    analysis_type: str | None = None,
+    analysis_type: str | None = DEFAULT_ANALYSIS,
 ) -> dict[str, Any]:
     """Open a design-iteration session for a part and reset its counter.
 
@@ -45,14 +62,11 @@ def start_design_loop(
     cycle. Calling it again on the same part restarts the loop from iteration 0.
 
     Args:
-        part_id: Part number under design, e.g. "BR-3310".
-        max_iterations: Hard cap on iterations before the loop stops. Default 5.
-        goal: Optional plain-language statement of what the loop is trying to
-            achieve, echoed back in status reports.
-        analysis_type: Optional scope -- "stiffness", "modal" or "stampability".
-            Set this when the engineer is iterating on ONE analysis, so the loop
-            converges once that analysis passes. Leave unset to require all
-            three analyses to pass before reporting convergence.
+        part_id: Part number under design, e.g. "10A.507.109".
+        max_iterations: Hard cap on agent iterations. Default 5.
+        goal: Optional plain-language statement of what the loop is for.
+        analysis_type: Which analysis the loop is responsible for. Defaults to
+            "stamping". Pass None to require every analysis to pass.
 
     Returns:
         The new session state.
@@ -61,6 +75,7 @@ def start_design_loop(
     scope = analysis_type.strip().lower() if analysis_type else None
     if scope and scope not in twin.ANALYSIS_TYPES:
         return {"error": f"Unknown analysis type '{analysis_type}'. Expected one of {list(twin.ANALYSIS_TYPES)}."}
+
     _SESSIONS[part_id] = {
         "partId": part_id,
         "iteration": 0,
@@ -86,13 +101,9 @@ def record_iteration(part_id: str, action: str, outcome: str, detail: str | None
 
     Args:
         part_id: Part number under design.
-        action: What was done this iteration, e.g.
-            "increase_fillet_radius on R-STP-01".
-        outcome: Result of the iteration -- use "success" or "failure".
+        action: What was done, e.g. "increase_hole_radius on R-STM-01".
+        outcome: "success" or "failure".
         detail: Optional extra context, e.g. the re-simulation verdict.
-
-    Returns:
-        The updated session, including the new iteration count.
     """
     part_id = part_id.strip().upper()
     session = _session(part_id)
@@ -124,6 +135,33 @@ def record_iteration(part_id: str, action: str, outcome: str, detail: str | None
     }
 
 
+def record_manual_rework_round(part_id: str, note: str | None = None) -> dict[str, Any]:
+    """Log that the engineer reported doing manual CAD rework in this loop.
+
+    This records the handover in the loop history. It does NOT change the
+    simulation state -- `record_manual_cad_rework` in the geometry tools does
+    that. Call this alongside it so the loop history tells the whole story.
+
+    Args:
+        part_id: Part number under design.
+        note: What the engineer said they changed.
+    """
+    part_id = part_id.strip().upper()
+    session = _session(part_id)
+    if session is None:
+        return {"error": f"No active design loop for {part_id}."}
+    session["history"].append(
+        {
+            "iteration": session["iteration"],
+            "action": "manual CAD rework by engineer",
+            "outcome": "reported",
+            "detail": note,
+            "atUtc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+    )
+    return {"partId": part_id, "recorded": True, "note": note}
+
+
 def cancel_design_loop(part_id: str, reason: str | None = None) -> dict[str, Any]:
     """Stop a design loop because the user asked to stop.
 
@@ -143,24 +181,23 @@ def cancel_design_loop(part_id: str, reason: str | None = None) -> dict[str, Any
         "active": False,
         "terminationReason": "user_cancelled",
         "iterationsCompleted": session["iteration"],
-        "message": f"Design loop for {part_id} cancelled by user"
-        + (f": {reason}" if reason else "."),
+        "message": f"Design loop for {part_id} cancelled by user" + (f": {reason}" if reason else "."),
     }
 
 
 def check_loop_status(part_id: str) -> dict[str, Any]:
-    """Decide -- in code, not by memory -- whether the design loop continues.
+    """Decide -- in code, not by memory -- what the design loop does next.
 
-    Evaluates all four termination conditions against the current session and
-    the live simulation state, and returns an explicit continue/stop verdict.
-    Call this before starting each new iteration.
+    Returns one of three verdicts: keep looping, wait for the engineer's manual
+    CAD rework, or stop. Obey it rather than judging for yourself, and never
+    count iterations in your head.
 
     Args:
-        part_id: Part number under design, e.g. "BR-3310".
+        part_id: Part number under design, e.g. "10A.507.109".
 
     Returns:
-        `shouldContinue` plus the termination reason and a human-readable
-        message naming which condition fired.
+        `shouldContinue`, `blockedOn` and `terminated` with the reason, plus the
+        current counts of agent-fixable and engineer-only regions.
     """
     part_id = part_id.strip().upper()
     session = _session(part_id)
@@ -168,37 +205,49 @@ def check_loop_status(part_id: str) -> dict[str, Any]:
         return {
             "partId": part_id,
             "shouldContinue": False,
+            "terminated": True,
+            "blockedOn": None,
             "terminationReason": "no_active_loop",
             "message": f"No design loop is running for {part_id}. Call start_design_loop to begin one.",
         }
 
     overview = get_analysis_overview(part_id)
-    scope = session.get("analysisType")
-    # Count only what this loop is responsible for. A loop scoped to
-    # stampability must converge when stampability passes, even if stiffness
-    # still has open regions the engineer did not ask about.
-    open_criticals = (
-        overview["byAnalysis"][scope]["criticalAreas"] if scope else overview["totalCriticalAreas"]
-    )
 
     # Already-terminated loops (user cancel / workflow failure) stay terminated.
     if not session["active"]:
-        reason = session["terminationReason"] or "stopped"
-        return _verdict(session, overview, False, reason)
+        return _verdict(session, overview, should_continue=False, reason=session["terminationReason"] or "stopped")
 
     # Condition 1: nothing critical left in this loop's scope.
-    if open_criticals == 0:
+    if _counts(session, overview)["open"] == 0:
         session["active"] = False
         session["terminationReason"] = "converged"
-        return _verdict(session, overview, False, "converged")
+        return _verdict(session, overview, should_continue=False, reason="converged")
 
     # Condition 2: iteration cap reached.
     if session["iteration"] >= session["maxIterations"]:
         session["active"] = False
         session["terminationReason"] = "max_iterations_reached"
-        return _verdict(session, overview, False, "max_iterations_reached")
+        return _verdict(session, overview, should_continue=False, reason="max_iterations_reached")
 
-    return _verdict(session, overview, True, None)
+    # Not terminated: the agent has nothing left it can legitimately fix, but
+    # critical regions remain. Hand over to the CAD engineer and wait.
+    if _counts(session, overview)["fixable"] == 0:
+        return _verdict(session, overview, should_continue=False, reason=None, blocked_on="manual_cad_rework")
+
+    return _verdict(session, overview, should_continue=True, reason=None)
+
+
+def _counts(session: dict[str, Any], overview: dict[str, Any]) -> dict[str, int]:
+    """Open / agent-fixable / engineer-only counts within the loop's scope."""
+    scope = session.get("analysisType")
+    if scope:
+        block = overview["byAnalysis"][scope]
+        return {"open": block["criticalAreas"], "fixable": block["agentFixable"], "engineer": block["engineerOnly"]}
+    return {
+        "open": overview["totalCriticalAreas"],
+        "fixable": overview["totalAgentFixable"],
+        "engineer": overview["totalEngineerOnly"],
+    }
 
 
 _MESSAGES = {
@@ -210,27 +259,56 @@ _MESSAGES = {
 }
 
 
-def _verdict(session: dict[str, Any], overview: dict[str, Any], should_continue: bool, reason: str | None) -> dict[str, Any]:
+def _verdict(
+    session: dict[str, Any],
+    overview: dict[str, Any],
+    should_continue: bool,
+    reason: str | None,
+    blocked_on: str | None = None,
+) -> dict[str, Any]:
     scope = session.get("analysisType")
-    open_criticals = (
-        overview["byAnalysis"][scope]["criticalAreas"] if scope else overview["totalCriticalAreas"]
-    )
+    counts = _counts(session, overview)
+    terminated = reason is not None
+
+    if reason:
+        message = _MESSAGES.get(reason, f"Loop stopped: {reason}.")
+        next_action = "Report the outcome to the engineer and summarise what changed."
+    elif blocked_on == "manual_cad_rework":
+        message = (
+            f"No agent-fixable regions remain, but {counts['engineer']} critical region(s) still need "
+            "CAD engineer rework. The loop is waiting for the engineer, not finished."
+        )
+        next_action = (
+            "Hand the remaining regions to the engineer with their suggested fixes, and ask them to make "
+            "the changes in CATIA and confirm when done. When they confirm, record the rework and re-run "
+            "the simulation."
+        )
+    else:
+        message = (
+            f"Loop continues: {counts['fixable']} agent-fixable region(s) open"
+            + (f" for {scope}" if scope else "")
+            + f", iteration {session['iteration']} of {session['maxIterations']}."
+        )
+        next_action = "Propose a change for the worst agent-fixable region, get approval, apply, re-simulate."
+
     return {
         "partId": session["partId"],
         "analysisScope": scope or "all",
         "shouldContinue": should_continue,
+        "terminated": terminated,
+        "blockedOn": blocked_on,
         "iteration": session["iteration"],
         "maxIterations": session["maxIterations"],
         "iterationsRemaining": max(0, session["maxIterations"] - session["iteration"]),
         "terminationReason": reason,
-        "criticalAreasRemaining": open_criticals,
+        "criticalAreasRemaining": counts["open"],
+        "agentFixableRemaining": counts["fixable"],
+        "engineerOnlyRemaining": counts["engineer"],
         "criticalAreasAllAnalyses": overview["totalCriticalAreas"],
-        "byAnalysis": overview["byAnalysis"],
         "modificationsApplied": overview["modificationsApplied"],
-        "message": _MESSAGES.get(reason or "", "")
-        or f"Loop continues: {open_criticals} critical region(s) still open"
-        + (f" for {scope}" if scope else "")
-        + f", iteration {session['iteration']} of {session['maxIterations']}.",
+        "manualReworkRounds": overview["manualReworkRounds"],
+        "message": message,
+        "nextAction": next_action,
     }
 
 

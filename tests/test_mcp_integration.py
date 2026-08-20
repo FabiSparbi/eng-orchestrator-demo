@@ -1,6 +1,6 @@
 """Proof that the Part Search Agent really uses MCP.
 
-The ePLM coarse search is a named demo goal and must be a genuine MCP
+The KVS coarse search is a named demo goal and must be a genuine MCP
 integration, not a plain function dressed up as one. DevUI's entity listing
 shows only statically-known tools, so the MCP tools do not appear there --
 they are discovered when the agent connects to the server at run time. These
@@ -45,7 +45,7 @@ class ToolRecordingClient(StubChatClient):
 
 @requires_config
 @pytest.mark.asyncio
-async def test_agent_discovers_eplm_tools_over_mcp_at_run_time():
+async def test_agent_discovers_kvs_tools_over_mcp_at_run_time():
     from agents.part_search.agent import agent  # noqa: PLC0415
 
     recorder = ToolRecordingClient()
@@ -58,11 +58,12 @@ async def test_agent_discovers_eplm_tools_over_mcp_at_run_time():
         agent.client = original_client
 
     # Served by the MCP server subprocess, not imported in-process.
-    assert "search_eplm_coarse" in recorder.seen_tools
+    assert "search_kvs_coarse" in recorder.seen_tools
     assert "get_part_record" in recorder.seen_tools
+    assert "fetch_drawing_ocr" in recorder.seen_tools
     # The in-process fine-search tools are there too.
     assert "analyze_drawing" in recorder.seen_tools
-    assert "rank_candidates" in recorder.seen_tools
+    assert "run_fine_search" in recorder.seen_tools
 
 
 def test_part_search_agent_module_does_not_import_the_server_code():
@@ -74,5 +75,5 @@ def test_part_search_agent_module_does_not_import_the_server_code():
         / "agent.py"
     ).read_text(encoding="utf-8")
     assert "MCPStdioTool" in source
-    assert "from eplm_mcp_server import" not in source
-    assert "import eplm_mcp_server" not in source
+    assert "from kvs_mcp_server import" not in source
+    assert "import kvs_mcp_server" not in source

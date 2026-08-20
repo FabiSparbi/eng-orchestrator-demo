@@ -103,17 +103,22 @@ async def test_apply_modification_pauses_for_approval_and_does_not_mutate():
     )
     client = StubChatClient(
         "apply_modification_workflow",
-        {"part_id": "BR-3310", "modification_type": "increase_fillet_radius", "analysis_type": "stampability"},
+        {
+            "part_id": "10A.507.109",
+            "modification_type": "increase_hole_radius",
+            "region_id": "R-STM-01",
+            "analysis_type": "stamping",
+        },
     )
     agent = Agent(name="GateTest", instructions="Test agent.", client=client, tools=[gated])
 
-    severity_before = twin.max_severity("BR-3310", "stampability")
-    response = await agent.run("Apply the fillet change to BR-3310.")
+    severity_before = twin.max_severity("10A.507.109", "stamping")
+    response = await agent.run("Apply the hole radius change to 10A.507.109.")
 
     assert _approval_requests(response), (
         "Expected an approval request in the response; the run did not pause for approval."
     )
-    assert twin.max_severity("BR-3310", "stampability") == severity_before, (
+    assert twin.max_severity("10A.507.109", "stamping") == severity_before, (
         "Digital twin was mutated before approval -- the human-in-the-loop gate failed."
     )
 
@@ -124,11 +129,11 @@ async def test_read_only_proposal_tool_runs_without_approval():
     ungated = tool(propose_geometry_change, name="propose_geometry_change")
     client = StubChatClient(
         "propose_geometry_change",
-        {"part_id": "BR-3310", "analysis_type": "stampability"},
+        {"part_id": "10A.507.109", "analysis_type": "stamping"},
     )
     agent = Agent(name="ProposeTest", instructions="Test agent.", client=client, tools=[ungated])
 
-    response = await agent.run("What do you recommend for BR-3310 stampability?")
+    response = await agent.run("What do you recommend for 10A.507.109 stamping?")
 
     assert not _approval_requests(response), "propose_geometry_change must not require approval."
     assert client.call_count == 2, "Tool should have executed and returned to the model."
@@ -144,12 +149,17 @@ async def test_approving_the_request_lets_the_change_through():
     )
     client = StubChatClient(
         "apply_modification_workflow",
-        {"part_id": "BR-3310", "modification_type": "increase_fillet_radius", "analysis_type": "stampability"},
+        {
+            "part_id": "10A.507.109",
+            "modification_type": "increase_hole_radius",
+            "region_id": "R-STM-01",
+            "analysis_type": "stamping",
+        },
     )
     agent = Agent(name="GateTest", instructions="Test agent.", client=client, tools=[gated])
 
-    severity_before = twin.max_severity("BR-3310", "stampability")
-    first = await agent.run("Apply the fillet change to BR-3310.")
+    severity_before = twin.max_severity("10A.507.109", "stamping")
+    first = await agent.run("Apply the hole radius change to 10A.507.109.")
     request = _approval_requests(first)[0]
 
     # Send the approval back, exactly as DevUI's Approve button does.
@@ -162,7 +172,7 @@ async def test_approving_the_request_lets_the_change_through():
         [*first.messages, Message(role="user", contents=[approval])]
     )
 
-    assert twin.max_severity("BR-3310", "stampability") < severity_before, (
+    assert twin.max_severity("10A.507.109", "stamping") < severity_before, (
         "Approved modification did not reach the digital twin."
     )
 
@@ -177,12 +187,17 @@ async def test_rejecting_the_request_leaves_geometry_untouched():
     )
     client = StubChatClient(
         "apply_modification_workflow",
-        {"part_id": "BR-3310", "modification_type": "increase_fillet_radius", "analysis_type": "stampability"},
+        {
+            "part_id": "10A.507.109",
+            "modification_type": "increase_hole_radius",
+            "region_id": "R-STM-01",
+            "analysis_type": "stamping",
+        },
     )
     agent = Agent(name="GateTest", instructions="Test agent.", client=client, tools=[gated])
 
-    severity_before = twin.max_severity("BR-3310", "stampability")
-    first = await agent.run("Apply the fillet change to BR-3310.")
+    severity_before = twin.max_severity("10A.507.109", "stamping")
+    first = await agent.run("Apply the hole radius change to 10A.507.109.")
     request = _approval_requests(first)[0]
 
     rejection = Content.from_function_approval_response(
@@ -194,6 +209,6 @@ async def test_rejecting_the_request_leaves_geometry_untouched():
         [*first.messages, Message(role="user", contents=[rejection])]
     )
 
-    assert twin.max_severity("BR-3310", "stampability") == severity_before, (
+    assert twin.max_severity("10A.507.109", "stamping") == severity_before, (
         "Geometry changed despite the user rejecting the approval request."
     )

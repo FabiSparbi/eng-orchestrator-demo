@@ -1,118 +1,150 @@
 """Offline walk-through of the demo's mechanics -- no Azure, no LLM.
 
 Runs the same tool sequence the orchestrator drives in DevUI, calling the tools
-directly. Use it to verify the mocked engineering logic and the convergence of
-the CAD/CAE loop before (or without) standing up a Foundry deployment.
+directly. Use it to verify the mocked engineering logic and the shape of the
+loop before (or without) standing up a Foundry deployment.
 
     python offline_demo.py
 
 What this does NOT exercise: the agents themselves, the model's tool choices,
-and DevUI's Approve/Reject panel. Those need real credentials and DevUI --
-here the approval step is simply printed, and the approval gate itself is
-covered by tests/test_approval_gate.py.
+and DevUI's Approve/Reject panel. Those need real credentials and DevUI -- here
+the approval step and the engineer's reply are simply printed. The approval gate
+itself is covered by tests/test_approval_gate.py.
 """
 
 from __future__ import annotations
 
+import asyncio
+import sys
+from pathlib import Path
+
 from mock_data import digital_twin as twin
 from tools import loop_state
-from tools.geometry_tools import apply_modification_workflow, propose_geometry_change
-from tools.part_search_tools import rank_candidates
-from tools.simulation_tools import get_analysis_overview, run_stampability_analysis
+from tools.drawing_analysis import run_fine_search
+from tools.geometry_tools import (
+    apply_modification_workflow,
+    propose_geometry_change,
+    record_manual_cad_rework,
+)
+from tools.simulation_tools import (
+    get_analysis_overview,
+    list_engineer_rework_items,
+    run_stamping_simulation,
+)
 
-REFERENCE_PART = "BR-2201"
-ANALYSIS = "stampability"
+ANALYSIS = "stamping"
 
 
 def rule(title: str) -> None:
-    print(f"\n{'=' * 68}\n{title}\n{'=' * 68}")
+    print(f"\n{'=' * 74}\n{title}\n{'=' * 74}")
 
 
-def main() -> None:
+async def main() -> None:
     twin.reset_all()
     loop_state.reset_all_sessions()
 
-    # --- Step 1: coarse search (the MCP server's logic) --------------------
-    rule("STEP 1  Part search -- coarse ePLM attribute filter (via MCP in DevUI)")
-    import sys
-    from pathlib import Path
-
+    # --- Step 1: coarse search over KVS (the MCP server's logic) -----------
+    rule("STEP 1  Coarse search -- KVS attribute filter (over MCP in DevUI)")
     sys.path.insert(0, str(Path(__file__).resolve().parent / "mcp_servers"))
-    from eplm_mcp_server import search_eplm_coarse  # noqa: PLC0415
+    from kvs_mcp_server import search_kvs_coarse  # noqa: PLC0415
 
-    search_fn = getattr(search_eplm_coarse, "fn", search_eplm_coarse)
-    coarse = search_fn(material="aluminium", max_weight_kg=2.85)
-    print(f"Filters: aluminium, <= 2.85 kg (the weight of {REFERENCE_PART})")
-    print(f"Coarse hits: {coarse['matchCount']}")
+    search_fn = getattr(search_kvs_coarse, "fn", search_kvs_coarse)
+    coarse = search_fn(component="B-pillar", max_weight_kg=6.0, created_within_years=2)
+    print("Engineer asks for: a B-pillar with a soft foot, max 6 kg, created in the last 2 years")
+    print(f"KVS filter: component=B-pillar (507), <= 6.0 kg, created after {coarse['filtersApplied']['created_after']}")
+    print(f"Catalog holds {coarse['catalogSize']} parts -> {coarse['matchCount']} pass the coarse filter\n")
     for part in coarse["parts"]:
-        print(f"  {part['partNumber']}  {part['weightKg']:>5} kg  {part['name']}")
+        print(f"  {part['partNumber']:<14}{part['weightKg']:>5} kg   {part['createdDate']}   {part['materialGrade']}")
+    print("\nNote: KVS knows nothing about a soft foot. That needs the drawings.")
 
-    # --- Step 2: fine search + ranking -------------------------------------
-    rule("STEP 2  Part search -- fine drawing analysis and ranking")
-    ranked = rank_candidates(REFERENCE_PART, [p["partNumber"] for p in coarse["parts"]])
-    for candidate in ranked["candidates"]:
-        print(
-            f"  #{candidate['rank']}  {candidate['partNumber']}  "
-            f"score={candidate['matchScore']:<6} fit={candidate['mountingPatternMatch']:<10} "
-            f"saves {candidate['weightSavingKg']} kg"
-        )
-    selected = ranked["candidates"][0]["partNumber"]
-    print(f"\nEngineer selects: {selected}")
+    # --- Step 2: fine search -- drawing OCR + soft-foot rule ---------------
+    rule("STEP 2  Fine search -- drawing OCR and the soft-foot rule (the slow step)")
+    candidates = [p["partNumber"] for p in coarse["parts"]]
+    fine = await run_fine_search(candidates)
+    print(f"Rule: {fine['rule']}")
+    print(f"Screened {fine['screenedCount']} drawings in ~{fine['approxSecondsSpent']}s\n")
+    print(f"  {'part':<14}{'kg':>6}  {'created':<12}{'soft foot':<11}HV values found")
+    for s in fine["screened"]:
+        mark = "YES" if s["hasSoftFoot"] else "no"
+        print(f"  {s['partNumber']:<14}{s['weightKg']:>6}  {s['createdDate']:<12}{mark:<11}{s['hvValues']}")
 
-    # --- Step 3: first simulation ------------------------------------------
-    rule(f"STEP 3  Simulation -- {ANALYSIS} check on {selected}")
-    loop_state.start_design_loop(
-        selected, max_iterations=5, goal=f"clear {ANALYSIS} criticals", analysis_type=ANALYSIS
-    )
-    result = run_stampability_analysis(selected)
-    print(result["summary"])
+    selected = fine["partsWithSoftFoot"][0]
+    print(f"\nEvidence for {selected}:")
+    hero = next(s for s in fine["screened"] if s["partNumber"] == selected)
+    for line in hero["evidence"]:
+        print(f"    {line}")
+    print(f"\nEngineer reviews the list and selects: {selected}")
+
+    # --- Step 3: stamping simulation ---------------------------------------
+    rule(f"STEP 3  Stamping simulation on {selected}")
+    loop_state.start_design_loop(selected, goal="clear stamping criticals", analysis_type=ANALYSIS)
+    result = run_stamping_simulation(selected)
+    print(result["summary"] + "\n")
     for area in result["criticalAreas"]:
-        print(f"  {area['regionId']}  severity={area['severity']}  {area['location']}")
+        tag = "AGENT" if area["agentFixable"] else "CAD ENG"
+        print(f"  [{tag:<7}] {area['regionId']}  {area['regionType']:<7} sev={area['severity']}  {area['location']}")
+        print(f"              -> {area['suggestedFix']}")
 
-    # --- Step 4-6: the loop -------------------------------------------------
-    rule("STEP 4  Design loop -- propose, approve, apply, re-simulate")
+    # --- Step 4: the agent fixes what it legitimately can ------------------
+    rule("STEP 4  Design loop -- the Geometry Agent fixes what it can")
     while True:
         status = loop_state.check_loop_status(selected)
         if not status["shouldContinue"]:
             break
 
         proposal = propose_geometry_change(selected, ANALYSIS)["proposal"]
-        if proposal is None:
-            break
-        print(
-            f"\n[iteration {status['iteration'] + 1}] Geometry Agent recommends: "
-            f"{proposal['modificationType']} on {proposal['targetRegion']}"
-        )
+        print(f"\n[iteration {status['iteration'] + 1}] Geometry Agent recommends:")
+        print(f"  {proposal['modificationType']} on feature {proposal['featureId']} ({proposal['targetRegion']})")
+        print(f"  {proposal['parameters']['fromMm']} mm -> {proposal['parameters']['toMm']} mm")
         print(f"  rationale: {proposal['rationale']}")
         print(f"  severity {proposal['currentSeverity']} -> expected {proposal['expectedSeverityAfter']}")
-
-        # In DevUI this is where the run pauses for Approve/Reject.
         print("  [APPROVAL GATE] in DevUI the run pauses here -- auto-approved offline")
 
         applied = apply_modification_workflow(
-            selected, proposal["modificationType"], ANALYSIS, proposal["targetRegion"]
+            selected, proposal["modificationType"], proposal["targetRegion"], ANALYSIS
         )
         print(f"  applied: {applied['status']}  job={applied.get('jobId')}  rev={applied.get('modelRevision')}")
-
         loop_state.record_iteration(
             selected, f"{proposal['modificationType']} on {proposal['targetRegion']}", applied["status"]
         )
+        resim = run_stamping_simulation(selected)
+        print(f"  re-simulation: {resim['criticalAreaCount']} critical region(s) left "
+              f"({resim['agentFixableCount']} agent-fixable, {resim['engineerOnlyCount']} CAD engineer)")
 
-        resim = run_stampability_analysis(selected)
-        print(f"  re-simulation: {resim['status']}  ({len(resim['criticalAreas'])} critical region(s) left)")
+    # --- Step 5: handover to the CAD engineer ------------------------------
+    status = loop_state.check_loop_status(selected)
+    rule("STEP 5  Handover -- human in the loop for what the agent cannot fix")
+    print(status["message"] + "\n")
+    worklist = list_engineer_rework_items(selected, ANALYSIS)
+    print(f"Worklist for the CAD engineer ({worklist['itemCount']} items):")
+    for item in worklist["worklist"]:
+        print(f"  {item['regionId']}  {item['regionType']:<7} sev={item['severity']}  {item['location']}")
+        print(f"            -> {item['suggestedFix']}")
 
-    # --- Step 7: termination ------------------------------------------------
-    rule("STEP 5  Loop termination")
+    print("\n  [ENGINEER REPLIES IN CHAT] \"I've made those changes in CATIA -- changes applied.\"")
+    record_manual_cad_rework(selected, ANALYSIS, note="Flange, wall, radius, bead and trim rework in CATIA")
+    loop_state.record_manual_rework_round(selected, "CAD engineer reworked the remaining regions")
+
+    # --- Step 6: re-simulate and finish ------------------------------------
+    rule("STEP 6  Re-simulation and loop termination")
+    final_sim = run_stamping_simulation(selected)
+    print(final_sim["summary"] + "\n")
     final = loop_state.check_loop_status(selected)
     print(f"Termination condition: {final['terminationReason']}")
     print(final["message"])
+
     overview = get_analysis_overview(selected)
-    print(f"\nOverall status for {selected}: {overview['overallStatus'].upper()}")
+    scope_status = overview["byAnalysis"][ANALYSIS]["status"].upper()
+    print(f"\n{ANALYSIS.capitalize()} (this loop's scope) for {selected}: {scope_status}")
+    print("\nOther analyses -- not part of this loop, shown for context:")
     for analysis, detail in overview["byAnalysis"].items():
-        print(f"  {analysis:<14} {detail['status']:<5} criticals={detail['criticalAreas']}  max severity={detail['maxSeverity']}")
-    print(f"\nModifications applied: {overview['modificationsApplied']}")
-    print("\nAll results above are synthetic -- mocked ePLM, drawings, CAD workflow and solver.")
+        if analysis == ANALYSIS:
+            continue
+        print(f"  {analysis:<11}{detail['status']:<6} criticals={detail['criticalAreas']}  max severity={detail['maxSeverity']}")
+    print(f"\nAgent modifications: {overview['modificationsApplied']}   "
+          f"Manual rework rounds: {overview['manualReworkRounds']}")
+    print("\nAll results above are synthetic -- mocked KVS, drawings, OCR, CAD workflow and solver.")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

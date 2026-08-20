@@ -4,13 +4,14 @@ A local, runnable demo of a **four-agent system** built on the **Microsoft Agent
 Framework** (Python) and inspected through **DevUI**, its local developer
 dashboard.
 
-One Orchestrator coordinates three specialists — Part Search, Geometry and
-Simulation — through an iterative engineering loop, with a **human approval gate
-on every geometry change**.
+An Orchestrator coordinates three specialists — Part Search, Simulation and
+Geometry — to find a B-pillar in the KVS PLM system, run a stamping simulation
+on it, and work through the critical regions: the agent fixes what a parametric
+change can fix, a human approves it, and a CAD engineer takes the rest.
 
-> **First-iteration demo scaffold.** Every backend integration (ePLM, drawing
-> analysis, parametric CAD workflow, CAE solver) is synthetic. Review and
-> validate before using any output in a client-facing setting.
+> **First-iteration demo scaffold.** Every backend integration (KVS, drawing
+> OCR, parametric CAD workflow, CAE solver) is synthetic. Review and validate
+> before using any output in a client-facing setting.
 
 ---
 
@@ -21,14 +22,50 @@ on every geometry change**.
 | Foundry Hosted Agents | A single Foundry model deployment backs all four agents. Hosting the *agents themselves* in Foundry Agent Service is a documented next step, not built here. |
 | Connected Agents architecture | `agent.as_tool()` wiring, orchestrator → three specialists. |
 | Tool calling | Every specialist has explicit function tools. |
-| MCP integration | Part Search's coarse ePLM search runs in a separate process, reached over a real stdio MCP connection. |
+| MCP integration | KVS runs in a separate process, reached over a real stdio MCP connection: coarse part search, master records, drawing retrieval. |
 | Multi-agent orchestration | Orchestrator + 3 specialists, visible in DevUI's trace view. |
-| Human-in-the-loop governance | `approval_mode="always_require"` on `apply_modification_workflow`, surfaced natively by DevUI as Approve/Reject. |
-| Iterative engineering validation | Simulate → recommend → approve → apply → re-simulate, with deterministic termination in `tools/loop_state.py` and a digital twin that visibly converges. |
+| Human-in-the-loop governance | Two distinct human steps: `approval_mode="always_require"` gates every agent geometry change, and the loop **pauses and waits** for a CAD engineer to rework what the agent cannot. |
+| Iterative engineering validation | Simulate → recommend → approve → apply → re-simulate → hand over → re-simulate, with the continue/wait/stop decision made deterministically in `tools/loop_state.py`. |
 
 **One model deployment, four agents.** `common/llm_client.py` builds exactly one
 `FoundryChatClient` and caches it; every agent is constructed with that same
 instance. No agent creates a client of its own.
+
+---
+
+## The scenario
+
+Part numbers in KVS look like **`10A.507.109`**:
+
+| Segment | Meaning |
+|---|---|
+| `10A` | Vehicle model |
+| `507` | Component class — **507 is the B-pillar** |
+| `109` | Part id |
+
+An engineer asks for *a B-pillar with a soft foot, at most 6 kg, created in the
+last two years*. Two search stages answer that, and only the second one can:
+
+- **Coarse (cheap, over MCP).** KVS filters on the component segment, weight and
+  creation date. It holds **no feature data at all** — nothing in the catalog
+  says whether a part has a soft foot.
+- **Fine (expensive, per part).** Each candidate's drawing is retrieved from KVS
+  and OCR'd, then a rule decides. About a second per drawing.
+
+**The soft-foot rule:** a drawing showing **two or more different HV hardness
+values** indicates a tailored hardness profile — a hardened upper section and a
+soft foot. A single uniform HV value means no soft foot.
+
+```
+HARDNESS ZONE A (UPPER SECTION): 480 +/- 30 HV10     <- two different values
+HARDNESS ZONE C (FOOT AREA):     200 +/- 20 HV10     <- => soft foot
+```
+
+In this iteration that rule is applied **deterministically in code**. In a
+production system the OCR text would go to a general-purpose LLM together with a
+description of the rule; the rule lives in one function
+(`tools/drawing_analysis.py::evaluate_soft_foot`) so it can be swapped for that
+call later.
 
 ---
 
@@ -100,107 +137,108 @@ python offline_demo.py
 
 ## Demo walk-through
 
-Select **OrchestratorAgent** in DevUI and work through these prompts. Everything
-below is what the tools actually produce.
+Select **OrchestratorAgent** in DevUI. Everything below is actual tool output.
 
-### 1. Find a replacement part
+The orchestrator supports three entry points — a search on its own, a simulation
+on a part you already have (*"run a stamping simulation on 10A.507.109"*), or the
+full flow below.
 
-> **Find a lighter bracket for Model X with similar mounting points to part BR-2201.**
+### 1. Find the part
 
-The orchestrator calls **PartSearchAgent**, which searches in two stages:
+> **I'm looking for a B-pillar that has a soft foot, weighs at most 6 kg, and was created in the last 2 years.**
 
-- **Coarse (over MCP):** `search_eplm_coarse` filters the ePLM catalog on
-  attributes only — material, weight, publication date. This tool lives in a
-  separate process (`mcp_servers/eplm_mcp_server.py`) and is reached over stdio
-  MCP. It has no access to geometry, by design.
-- **Fine (in-process):** `analyze_drawing` and `compare_mounting_interfaces`
-  read the drawings and compare mounting interfaces against BR-2201.
+**Coarse search over MCP** filters the 50-part catalog down to 8 B-pillars.
+Fifteen parts meet the weight and date criteria, but seven of them are A-pillars,
+door inners and side sills — the component segment excludes them.
 
-Ranked candidates come back roughly as:
+**Fine search** then OCRs all 8 drawings (~8 s) and applies the HV rule. Every
+screened part is reported, not just the survivors, so the engineer can see what
+was checked and why each was ruled in or out:
 
-| # | Part | Score | Fit | Saving |
+| Part | kg | Created | Soft foot | HV values |
 |---|---|---|---|---|
-| 1 | BR-3310 | 0.887 | exact | 1.23 kg |
-| 2 | BR-5501 | 0.806 | exact | 0.90 kg |
-| 3 | BR-7150 | 0.662 | **different** | 1.37 kg |
-| 4 | BR-6002 | 0.192 | **different** | 0.65 kg |
+| **10A.507.109** | 5.21 | 2026-04-26 | **YES** | 480, 200 |
+| 15A.507.640 | 4.15 | 2025-12-18 | no | 480 |
+| 10A.507.979 | 4.62 | 2025-06-24 | no | 495 |
+| 21B.507.658 | 4.98 | 2026-02-21 | no | 450 |
+| 10A.507.893 | 5.40 | 2025-02-06 | no | 470 |
+| 12D.507.290 | 5.63 | 2025-07-23 | no | 470 |
+| 22A.507.591 | 5.85 | 2025-10-07 | no | 450 |
+| 10B.507.427 | 5.94 | 2025-10-27 | no | 450 |
 
-Note BR-7150: it saves *more* weight than BR-5501 (1.37 kg vs 0.90 kg), so a
-weight-only ranking would put it second — but its drawing shows a 4×M8 pattern
-on a 150×90 mm pitch where BR-2201 needs 4×M10 on 120×80 mm. It does not bolt
-in. That distinction is invisible to the coarse attribute search and is exactly
-what the fine drawing analysis exists to catch.
+Note that the lightest part is *not* the answer — only `10A.507.109` carries two
+hardness callouts, and that is invisible to the catalog search.
 
-### 2. Select a candidate
+### 2. Pick a candidate
 
-> **Let's go with BR-3310.**
+> **Let's go with 10A.507.109.**
 
-### 3. Run a simulation
+### 3. Run the stamping simulation
 
-> **Run a stampability check on it.**
+> **Run a stamping simulation on it.**
 
-The orchestrator calls **SimulationAgent** → `run_stampability_analysis`. It fails:
-
-```
-Stampability analysis FAILED for BR-3310: 2 critical region(s), worst severity 0.71.
-  R-STP-01  severity=0.71  Deep draw corner, front left radius
-  R-STP-02  severity=0.44  Flange wrap, rear edge
-```
-
-### 4. Get a recommendation
-
-> **What can we do about the worst region?**
-
-The orchestrator summarises and calls **GeometryAgent** →
-`propose_geometry_change`, which is **read-only** — it recommends, it does not
-change anything:
+It fails, with **seven** critical regions — and this is the point of the demo:
 
 ```
-increase_fillet_radius on R-STP-01
-  Open up the draw radius to bring thinning back under the forming limit.
-  severity 0.71 -> expected 0.39
+[AGENT  ] R-STM-01  hole    sev=0.68  Fastening hole D13.5, lower foot area
+            -> Increase hole radius from 6.75 mm to 8.50 mm
+[CAD ENG] R-STM-02  flange  sev=0.61  Upper weld flange, outboard edge
+            -> Rework flange geometry / revise blank holder layout in CATIA
+[CAD ENG] R-STM-03  wall    sev=0.57  Draw wall, mid-section inboard
+[CAD ENG] R-STM-04  radius  sev=0.54  Transition radius, zone B
+[CAD ENG] R-STM-05  bead    sev=0.47  Draw bead, rear die face
+[CAD ENG] R-STM-06  flange  sev=0.41  Lower foot flange, trim edge
+[CAD ENG] R-STM-07  wall    sev=0.36  Side wall near soft-zone boundary
 ```
 
-### 5. The human-in-the-loop gate ⛔
+**One** of the seven is agent-fixable: a hole attached to a named CATIA feature
+whose fix is a parameter change. The other six need a CAD engineer. The
+Simulation Agent always reports that split explicitly.
+
+### 4. The approval gate ⛔
+
+The Geometry Agent proposes `increase_hole_radius` on feature `HOLE_D13_5_LH`,
+6.75 mm → 8.50 mm, and lists the six regions it cannot touch.
 
 > **Apply that change.**
 
-The Geometry Agent calls `apply_modification_workflow` — and **the run pauses.**
-DevUI renders an **Approve / Reject** panel showing the tool and its arguments.
-Nothing has been modified yet.
+The run **pauses.** DevUI renders an **Approve / Reject** panel showing the tool
+and its arguments. Nothing has been modified yet.
 
-- **Reject** → the change is not applied and the agent reports that plainly.
+- **Reject** → nothing is applied and the agent says so.
 - **Approve** → the workflow runs and returns a job id and model revision.
 
-This gate is the load-bearing governance mechanism, so it is tested directly
-rather than taken on trust — see `tests/test_approval_gate.py`, which drives the
-tool call with a stub model and asserts the digital twin is untouched until
-approval arrives, applied on approve, and still untouched on reject.
+Re-simulation shows **6** regions left, `0` of them agent-fixable. Notably the
+other six severities are unchanged — a hole radius change fixes the hole and
+nothing else, which is asserted in the tests.
 
-### 6. Re-simulate and iterate
+### 5. The handover — the second human step 👷
 
-> **Re-run the stampability check.**
-
-Severity drops. While regions remain, the loop repeats: propose → approve →
-apply → re-simulate. Each cycle the orchestrator calls `record_iteration` and
-then `check_loop_status`, which owns the continue/stop decision **in code** —
-the model is never trusted to count iterations across turns.
-
-### 7. Convergence
-
-After three approved modifications the analysis passes and the loop ends:
+`check_loop_status` now returns something that is neither "continue" nor
+"finished":
 
 ```
+shouldContinue: false
+terminated:     false
+blockedOn:      "manual_cad_rework"
+```
+
+So the orchestrator hands over the worklist — each region with its location and
+suggested fix — and asks the engineer to make those changes in CATIA. Then it
+**waits**.
+
+> **I've made those changes in CATIA — changes applied.**
+
+The orchestrator records the rework and re-runs the simulation.
+
+### 6. Convergence
+
+```
+Stamping simulation PASSED for 10A.507.109: no critical regions remain.
 Termination condition: converged
-All critical regions resolved -- design converged.
-
-Overall status for BR-3310: PASS
-  stiffness      pass  criticals=0  max severity=0.284
-  modal          pass  criticals=0  max severity=0.214
-  stampability   pass  criticals=0  max severity=0.12
 ```
 
-The orchestrator cites which of the four termination conditions fired:
+The orchestrator names which of the four termination conditions fired:
 
 | Reason | Meaning |
 |---|---|
@@ -209,14 +247,9 @@ The orchestrator cites which of the four termination conditions fired:
 | `user_cancelled` | The engineer stopped the loop. |
 | `geometry_workflow_failed` | The geometry workflow reported a failure. |
 
-Applied modifications also improve the *other* analyses a little — stiffening a
-rib shifts the modal response too — so the part reaches overall PASS. That
-coupling is deliberate, and it is why the demo ends on a satisfying result
-rather than a mechanical iteration cutoff.
-
-**Other things worth trying:** run the specialists standalone (each is
-registered separately in DevUI); reject an approval to see the gate hold; ask to
-stop mid-loop to trigger `user_cancelled`.
+**Other things worth trying:** ask the Geometry Agent to fix `R-STM-02` and watch
+it refuse with a reason; reject an approval to see the gate hold; run the
+specialists standalone; ask to stop mid-loop to trigger `user_cancelled`.
 
 ---
 
@@ -226,15 +259,17 @@ stop mid-loop to trigger `user_cancelled`.
 |---|---|---|
 | LLM calls | **Real** — live Azure AI Foundry calls via `DefaultAzureCredential` | Unchanged; point at a production deployment. |
 | Agent orchestration, tool calling, approval gate, MCP transport | **Real** Agent Framework machinery | Unchanged. |
-| ePLM catalog + coarse search | Mocked — `mock_data/eplm_catalog.json`, served over a real MCP server | Replace `_load_catalog()` with the ePLM query API (REST/OData). The tool signature and the agent side stay as they are. |
-| Drawing analysis (fine search) | Mocked — hand-authored fixtures in `tools/drawing_analysis.py` | Call a vision-capable model over the drawing referenced by `drawingRef`, or a CAD feature-recognition service. Keep the return shape. |
-| Geometry modification workflow | Mocked — `tools/geometry_tools.py` mutates an in-memory twin | Call the parametric CAD/PLM change workflow (e.g. CATIA/NX automation), returning the real job id and revision. **The approval gate stays exactly where it is.** |
-| CAE analyses | Mocked — `tools/simulation_tools.py` reads the twin | Submit to the real solver (Abaqus / LS-DYNA / AutoForm) and parse results into the same unified schema. |
-| Agent hosting | Local process + DevUI | Deploy these same agents to Foundry Agent Service. The repo is structured so this is a follow-on step, not a rewrite. |
+| KVS catalog + coarse search | Mocked — `mock_data/kvs_catalog.json`, served over a real MCP server | Replace `_load_catalog()` with the KVS query API. The agent side does not change. |
+| Drawing retrieval + OCR | Mocked — fabricated drawing text in `mock_data/drawing_ocr.py` | Fetch the real drawing PDF from KVS and OCR it (Azure Document Intelligence, Tesseract). |
+| Soft-foot determination | Mocked — deterministic HV rule in `tools/drawing_analysis.py` | Hand the OCR text plus the rule to a general-purpose LLM. Deliberately **not** done in this iteration, to keep the demo reproducible. |
+| Stamping simulation | Mocked — `tools/simulation_tools.py` reads the twin | Submit to the real forming solver (AutoForm / LS-DYNA) and parse results into the same schema, including the agent-fixable classification. |
+| Parametric geometry change | Mocked — `tools/geometry_tools.py` mutates an in-memory twin | Call the real CATIA/NX automation service. **The approval gate stays exactly where it is.** |
+| Manual CAD rework | Mocked — the engineer's chat confirmation clears the regions | Same handover, but the engineer's actual CATIA revision would be checked back into PLM and re-simulated. |
+| Agent hosting | Local process + DevUI | Deploy these same agents to Foundry Agent Service. |
 
 ### State and persistence
 
-Loop iteration counts and the digital twin live in **module-level Python dicts**
+Loop state and the digital twin live in **module-level Python dicts**
 (`mock_data/digital_twin.py`, `tools/loop_state.py`). They exist for the life of
 the process and reset on restart — deliberate for a single-process local demo,
 and called out in both files. Nothing outside those modules touches the dicts
@@ -248,24 +283,24 @@ survive restarts or be shared across replicas.
 
 ```
 common/llm_client.py            The one shared FoundryChatClient (cached)
-mcp_servers/eplm_mcp_server.py  stdio MCP server: coarse ePLM attribute search
+mcp_servers/kvs_mcp_server.py   stdio MCP server: KVS search, records, drawings
 mock_data/
-  eplm_catalog.json             Synthetic part catalog
-  digital_twin.py               In-memory per-part simulation state
+  kvs_catalog.json              50 synthetic parts (40 B-pillars + 10 decoys)
+  drawing_ocr.py                Fabricated drawing OCR text per part
+  digital_twin.py               In-memory simulation state, typed regions
 tools/
-  drawing_analysis.py           Fine search: mounting-interface extraction
-  part_search_tools.py          Ranked-candidate assembly
-  simulation_tools.py           Three mocked CAE analyses
-  geometry_tools.py             Propose (read-only) + apply (approval-gated)
-  loop_state.py                 Deterministic iteration count and termination
+  drawing_analysis.py           Fine search: HV rule, soft-foot verdict
+  simulation_tools.py           Stamping simulation + stiffness/modal
+  geometry_tools.py             Propose, apply (gated), record manual rework
+  loop_state.py                 Continue / wait-for-engineer / stop, in code
 agents/
   part_search/agent.py          Coarse (MCP) + fine search
-  simulation/agent.py           CAE analyses
-  geometry/agent.py             Carries the human-in-the-loop gate
+  simulation/agent.py           CAE analyses and the fixability split
+  geometry/agent.py             Carries the approval gate
   orchestrator/agent.py         Wires the specialists via .as_tool()
 run_devui.py                    Registers all four agents in DevUI
 offline_demo.py                 Walk-through mechanics without Azure
-tests/                          46 tests; no credentials required
+tests/                          68 tests; no credentials required
 ```
 
 ---
@@ -277,10 +312,18 @@ Assumptions made in building this — flagged rather than silently adopted:
 - **Local only.** Runs and is inspected through DevUI on localhost. No
   deployment to Foundry Agent Service hosted agents.
 - **In-memory state.** Resets on restart, as described above.
-- **All backends synthetic.** No real ePLM, CAD, or solver is contacted.
-- **Approval on applying, not proposing.** `propose_geometry_change` is
-  ungated because recommending is not changing; only
-  `apply_modification_workflow` mutates design state and it is always gated.
+- **All backends synthetic.** No real KVS, CATIA, or solver is contacted.
+- **No LLM inference in the fine search.** The soft-foot rule is deterministic
+  code in this iteration, by choice.
+- **Exactly one catalog part has a soft foot**, so the demo has one unambiguous
+  answer.
+- **Catalog dates are relative to when the catalog was generated** (`_generatedFor` in `kvs_catalog.json`). The "last 2 years" query depends on that window; regenerate the catalog if today drifts far past it.
+- **The soft-foot rule is approximate.** "Two different HV values" is a working
+  heuristic, not a validated engineering definition. It is isolated in one
+  function so it can be corrected.
+- **Approval on applying, not proposing.** `propose_geometry_change` is ungated
+  because recommending is not changing. `record_manual_cad_rework` is also
+  ungated: it records work a human says they already did, and the gate exists to
+  supervise the *agent*, not the engineer.
 - **Sub-agent calls are ungated.** Gating the whole `as_tool()` call would ask
-  the engineer to approve merely *consulting* a specialist. The gate sits on
-  the one tool that changes geometry.
+  the engineer to approve merely *consulting* a specialist.

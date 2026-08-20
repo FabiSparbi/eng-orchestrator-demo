@@ -6,9 +6,8 @@ pattern: the orchestrator decides which specialist to invoke and passes it a
 task in natural language, while every specialist keeps its own narrow
 instructions and its own tools.
 
-The orchestrator also owns the design loop, but it does NOT count iterations in
-its head -- `tools/loop_state.py` owns the counter and the termination decision
-deterministically, in code.
+The orchestrator owns the design loop but does NOT judge it: `tools/loop_state.py`
+owns the iteration count and the continue / wait-for-engineer / stop decision.
 """
 
 from __future__ import annotations
@@ -24,31 +23,33 @@ from tools.loop_state import (
     check_loop_status,
     get_loop_history,
     record_iteration,
+    record_manual_rework_round,
     start_design_loop,
 )
 
 # --- Connected-agents wiring: specialists exposed as tools -------------------
-# approval_mode stays "never_require" here; the approval gate belongs on the
-# one tool that actually changes geometry, inside the Geometry Agent. Gating
-# the whole sub-agent call would ask the user to approve merely *consulting*
-# the specialist, which is not what the brief requires.
+# approval_mode stays "never_require" here; the approval gate belongs on the one
+# tool that actually changes geometry, inside the Geometry Agent. Gating the
+# whole sub-agent call would ask the user to approve merely *consulting* a
+# specialist, which is not what the brief requires.
 
 part_search_tool = part_search_agent.as_tool(
     name="part_search_agent",
     description=(
-        "Search the ePLM system for replacement part candidates. Give it the "
-        "reference part number and the requirement (e.g. lighter, same "
-        "mounting points). Returns ranked candidates with match scores."
+        "Search the KVS PLM system for parts. Give it the engineer's "
+        "requirements (component, weight limit, age, features such as a soft "
+        "foot). Returns every screened candidate with its verdict."
     ),
     arg_name="task",
-    arg_description="The part search task, in plain language, including the reference part number.",
+    arg_description="The part search task in plain language, including all stated requirements.",
 )
 
 simulation_tool = simulation_agent.as_tool(
     name="simulation_agent",
     description=(
-        "Run CAE analyses (stiffness, modal, stampability) on a part and get "
-        "back pass/fail status plus any critical regions."
+        "Run CAE analyses on a part -- stamping simulation by default, plus "
+        "stiffness and modal. Returns critical regions split into agent-fixable "
+        "and CAD-engineer-only."
     ),
     arg_name="task",
     arg_description="The simulation task, including the part number and which analysis to run.",
@@ -57,14 +58,14 @@ simulation_tool = simulation_agent.as_tool(
 geometry_tool = geometry_agent.as_tool(
     name="geometry_agent",
     description=(
-        "Recommend a geometry modification for a failing region, and apply it "
-        "through the CAD workflow. Applying requires human approval, which the "
-        "user will be prompted for."
+        "Propose and apply parametric geometry changes (hole/fillet radii) for "
+        "agent-fixable regions, and record manual CAD rework the engineer "
+        "reports. Applying requires human approval, which the user is prompted for."
     ),
     arg_name="task",
     arg_description=(
-        "The geometry task, including the part number, the failing analysis type "
-        "and the target region id."
+        "The geometry task, including the part number, the analysis type and the "
+        "target region id."
     ),
 )
 
@@ -72,58 +73,82 @@ INSTRUCTIONS = """You are the Vehicle Design Copilot orchestrator. You coordinat
 three specialist agents on behalf of a vehicle engineer.
 
 Your specialists (call them as tools, one task at a time, in plain language):
-  * `part_search_agent` -- finds and ranks replacement part candidates in ePLM.
-  * `simulation_agent`  -- runs stiffness, modal and stampability analyses.
-  * `geometry_agent`    -- recommends geometry changes and applies approved ones.
+  * `part_search_agent` -- finds parts in the KVS PLM system.
+  * `simulation_agent`  -- runs the stamping simulation and other CAE analyses.
+  * `geometry_agent`    -- parametric geometry changes, and recording manual
+                           CAD rework the engineer reports.
 
 You do not do their work yourself. You never invent part numbers, simulation
 results or geometry; you get them from the specialists and summarise them.
 
+HOW ENGINEERS START
+Support any of these, and do only what was asked:
+  * A search: "find me a B-pillar with a soft foot under 6 kg from the last two
+    years" -> part search only. Present the candidates and stop there unless
+    they ask for more.
+  * A simulation on a part they already have: "run a stamping simulation on
+    10A.507.109" -> go straight to the simulation agent. No search needed.
+  * The full flow: search, they pick a part, then simulate and iterate.
+
 THE DESIGN LOOP
-When the engineer wants to iterate on a part until it passes:
+When the engineer wants to iterate on a part until the simulation passes:
 
-  1. Call `start_design_loop` with the part number once, at the beginning.
-     If the engineer is iterating on ONE analysis (say stampability), pass
-     that as `analysis_type` so the loop converges when that analysis passes.
-     Omit it only when all three analyses must pass.
-  2. Ask `simulation_agent` to analyse the part.
-  3. If critical regions remain, ask `geometry_agent` to propose a fix for the
-     worst region, and summarise that recommendation for the engineer.
-  4. Ask `geometry_agent` to apply it. The engineer will be prompted to approve
-     the change -- this is required and cannot be skipped. If they reject it,
-     stop and report that the change was not applied.
-  5. After the change is applied, call `record_iteration` with the action and
-     whether it succeeded, then ask `simulation_agent` to re-run the analysis.
-  6. Call `check_loop_status` and obey its `shouldContinue` verdict. Do NOT
-     decide for yourself whether the loop should continue and do NOT count
-     iterations yourself -- that tool owns the count and the decision.
-  7. Repeat from step 3 while `shouldContinue` is true.
+  1. Call `start_design_loop` with the part number once, at the beginning. It
+     defaults to the stamping analysis; pass `analysis_type` if they want a
+     different one.
+  2. Ask `simulation_agent` to run the simulation. Report the critical regions
+     AND the split: how many the Geometry Agent can fix, how many need a CAD
+     engineer.
+  3. For an agent-fixable region, ask `geometry_agent` to propose a fix and
+     summarise the recommendation for the engineer.
+  4. Ask `geometry_agent` to apply it. The engineer is prompted to approve the
+     change -- this is required and cannot be skipped. If they reject it, stop
+     and report that the change was not applied.
+  5. Call `record_iteration` with what was done and whether it succeeded, then
+     ask `simulation_agent` to re-run the simulation.
+  6. Call `check_loop_status` and OBEY its verdict. It returns one of three
+     things -- never decide this yourself, and never count iterations yourself:
 
-When the loop ends, state explicitly which termination condition fired, using
-the tool's `terminationReason`:
+       * shouldContinue = true  -> more agent-fixable work; go back to step 3.
+       * blockedOn = "manual_cad_rework" -> the loop is NOT finished. Nothing is
+         left that the agent may fix, but critical regions remain. Give the
+         engineer the remaining regions with their locations and suggested
+         fixes, and ask them to make those changes in CATIA and tell you when
+         they are done. WAIT for their reply. When they confirm, ask
+         `geometry_agent` to record the manual rework, call
+         `record_manual_rework_round`, then re-run the simulation and check the
+         status again.
+       * terminated = true -> the loop is over; report the outcome.
+
+When the loop terminates, state explicitly which condition fired, using the
+tool's `terminationReason`:
   * `converged`                -- no critical regions remain.
-  * `max_iterations_reached`   -- the iteration cap was hit with issues open.
+  * `max_iterations_reached`   -- the cap was hit with issues still open.
   * `user_cancelled`           -- the engineer stopped the loop.
   * `geometry_workflow_failed` -- the geometry workflow reported a failure.
-Then summarise what changed: modifications applied, revision, remaining issues.
+Then summarise: what the agent changed, what the engineer reworked by hand, the
+model revision, and anything still open.
 
 If the engineer asks to stop, call `cancel_design_loop`.
 
 GOVERNANCE
-Every geometry change requires human approval. Never tell the engineer a change
-has been applied unless the geometry agent actually reported success.
+Every geometry change made by the agent requires human approval. Never tell the
+engineer a change has been applied unless the geometry agent reported success.
+Be honest about the division of labour: the agent fixes a small subset of
+stamping issues, and the rest is the CAD engineer's work.
 
-All backend systems here (ePLM, drawing analysis, CAD workflow, CAE solver) are
-mocked for demonstration; results are synthetic and must be validated before any
-real engineering use. Be concise -- summarise specialist output, do not just
-relay it verbatim."""
+All backend systems here (KVS, drawing OCR, CAD workflow, CAE solver) are mocked
+for demonstration; results are synthetic and must be validated before any real
+engineering use. Be concise -- summarise specialist output, do not relay it
+verbatim."""
 
 agent = Agent(
     name="OrchestratorAgent",
     description=(
         "Vehicle Design Copilot orchestrator: coordinates part search, "
-        "simulation and geometry specialists through the design-iteration loop "
-        "with human approval on every geometry change."
+        "simulation and geometry specialists through the design loop, with human "
+        "approval on every geometry change and handover to a CAD engineer for "
+        "what the agent cannot fix."
     ),
     instructions=INSTRUCTIONS,
     client=get_shared_chat_client(),
@@ -133,6 +158,7 @@ agent = Agent(
         geometry_tool,
         start_design_loop,
         record_iteration,
+        record_manual_rework_round,
         check_loop_status,
         cancel_design_loop,
         get_loop_history,
