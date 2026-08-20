@@ -1,15 +1,28 @@
-"""Geometry Agent -- parametric changes it can make, and honest handover of
-everything it cannot.
+"""Geometry Agent -- recommends parametric changes and hands over the rest.
 
-THE HUMAN-IN-THE-LOOP GATE LIVES HERE. `apply_modification_workflow` is wrapped
-with approval_mode="always_require", so the Agent Framework suspends the run and
-DevUI renders an Approve/Reject prompt before the tool ever executes. There is
-no code path that applies geometry without that approval.
+THIS AGENT DOES NOT APPLY GEOMETRY. It recommends; the Orchestrator executes the
+approved change. That split is not cosmetic -- it is required for the approval
+gate to work at all.
+
+WHY (reproduced, see tests/test_approval_roundtrip.py)
+-----------------------------------------------------
+`agent.as_tool()` runs a sub-agent as a stateless function call. If a tool
+inside the sub-agent requires approval, the framework raises
+UserInputRequiredException and the sub-agent run is ABANDONED; the approval
+request is re-tagged with the ORCHESTRATOR's call id and surfaced to the user.
+When the user approves, the orchestrator re-invokes this agent as a tool -- a
+fresh run with no memory of the pending approval -- so it proposes the same
+change again and hits the gate again. The result is an infinite
+approve -> re-ask loop in which the change is NEVER applied.
+
+Putting the gated tool on the agent that owns the conversation fixes it: the
+approval response then matches that agent's own function call and resumes it.
 
 `record_manual_cad_rework` also changes state but is deliberately NOT gated: it
 records what a CAD engineer says they already did by hand in CATIA. The gate
 exists to stop an agent changing geometry unsupervised; asking the engineer to
-approve their own report would be noise.
+approve their own report would be noise. Being ungated, it round-trips through
+as_tool() without trouble.
 """
 
 from __future__ import annotations
@@ -18,7 +31,6 @@ from agent_framework import Agent, tool
 
 from common.llm_client import get_shared_chat_client
 from tools.geometry_tools import (
-    apply_modification_workflow,
     get_modification_history,
     propose_geometry_change,
     record_manual_cad_rework,
@@ -32,17 +44,6 @@ propose_tool = tool(
         "Recommend a parametric change for an agent-fixable critical region, and "
         "list the regions that need CAD engineer rework instead. Read-only."
     ),
-)
-
-# The one tool where the AGENT mutates design state, and the only one gated.
-apply_tool = tool(
-    apply_modification_workflow,
-    name="apply_modification_workflow",
-    description=(
-        "Apply a parametric geometry change through the CAD workflow. MUTATES "
-        "DESIGN STATE and requires explicit human approval before it runs."
-    ),
-    approval_mode="always_require",
 )
 
 # The human half of the loop: the engineer's own report of manual CATIA work.
@@ -83,21 +84,17 @@ YOUR WORKFLOW
    which region, the parameter change, and what it is expected to achieve. Then
    list the out-of-scope regions with their suggested fixes, clearly marked as
    requiring CAD engineer rework.
-3. Only if the engineer wants to proceed, call `apply_modification_workflow`.
-   That tool requires explicit human approval and will pause for it.
-4. After it returns successfully, report the job id, the model revision, the
-   region's new severity, and how many regions remain in each category. Then
-   recommend re-running the simulation to confirm the effect.
-5. If the engineer tells you they have made the remaining changes themselves in
+3. Return the recommendation. You do NOT apply it -- you have no tool that can.
+   The orchestrator applies the approved change after the engineer approves it.
+4. If the engineer tells you they have made the remaining changes themselves in
    CATIA, call `record_manual_cad_rework` to record it, then recommend
    re-running the simulation.
 
-IMPORTANT LIMITATION: You cannot autonomously finalize a geometry change.
-Every geometry modification must be approved by a human before it is applied.
-Never state or imply that a change has been applied, finalized, released or
-committed unless `apply_modification_workflow` has actually returned a success
-result. If approval is refused, or the tool returns a failure, say so plainly
-and do not retry the same modification without new instructions.
+IMPORTANT LIMITATION: You cannot autonomously finalize a geometry change, and
+you cannot apply one at all. Every geometry modification must be approved by a
+human and is then executed by the orchestrator. Never state or imply that a
+change has been applied, finalized, released or committed -- you are never the
+one who applies it. Report your recommendation and stop there.
 
 Your outputs are engineering recommendations from a mock workflow, not a
 released design. Be concise and precise about what has and has not happened."""
@@ -105,11 +102,11 @@ released design. Be concise and precise about what has and has not happened."""
 agent = Agent(
     name="GeometryAgent",
     description=(
-        "Applies parametric geometry changes (hole and fillet radii) to "
-        "agent-fixable critical regions after explicit human approval, and hands "
-        "everything else to a CAD engineer."
+        "Recommends parametric geometry changes (hole and fillet radii) for "
+        "agent-fixable critical regions, hands everything else to a CAD "
+        "engineer, and records manual rework. Does not apply changes itself."
     ),
     instructions=INSTRUCTIONS,
     client=get_shared_chat_client(),
-    tools=[propose_tool, apply_tool, manual_rework_tool, history_tool],
+    tools=[propose_tool, manual_rework_tool, history_tool],
 )

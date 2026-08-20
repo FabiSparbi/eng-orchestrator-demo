@@ -60,9 +60,10 @@ async def test_agent_discovers_kvs_tools_over_mcp_at_run_time():
     # Served by the MCP server subprocess, not imported in-process.
     assert "search_kvs_coarse" in recorder.seen_tools
     assert "get_part_record" in recorder.seen_tools
-    assert "fetch_drawing_ocr" in recorder.seen_tools
+    # fetch_drawing_ocr is served by the same MCP server but kept off the
+    # model's menu via allowed_tools -- see test_part_search_offers_no_per_
+    # drawing_tool in test_approval_roundtrip.py for why.
     # The in-process fine-search tools are there too.
-    assert "analyze_drawing" in recorder.seen_tools
     assert "run_fine_search" in recorder.seen_tools
 
 

@@ -12,12 +12,13 @@ owns the iteration count and the continue / wait-for-engineer / stop decision.
 
 from __future__ import annotations
 
-from agent_framework import Agent
+from agent_framework import Agent, tool
 
 from agents.geometry.agent import agent as geometry_agent
 from agents.part_search.agent import agent as part_search_agent
 from agents.simulation.agent import agent as simulation_agent
 from common.llm_client import get_shared_chat_client
+from tools.geometry_tools import apply_modification_workflow
 from tools.loop_state import (
     cancel_design_loop,
     check_loop_status,
@@ -69,14 +70,38 @@ geometry_tool = geometry_agent.as_tool(
     ),
 )
 
+# --- The human-in-the-loop gate, deliberately owned by the ORCHESTRATOR ------
+# This is the only tool in the build that lets an agent change geometry, and it
+# lives here rather than inside the Geometry Agent for a load-bearing reason.
+#
+# A gated tool inside a sub-agent invoked via as_tool() can never complete: the
+# sub-agent run is abandoned when approval is required, and the user's approval
+# resumes THIS agent, which simply re-invokes the sub-agent from scratch -- so it
+# re-proposes, re-gates, and the change is never applied. Reproduced and pinned
+# down in tests/test_approval_roundtrip.py.
+#
+# Owned here, the approval response matches this agent's own function call and
+# resumes it, so approving actually applies the change. The Geometry Agent still
+# owns the recommendation; the orchestrator owns the approved action.
+apply_geometry_tool = tool(
+    apply_modification_workflow,
+    name="apply_modification_workflow",
+    description=(
+        "Apply a parametric geometry change recommended by the geometry agent. "
+        "MUTATES DESIGN STATE and requires explicit human approval before it runs."
+    ),
+    approval_mode="always_require",
+)
+
 INSTRUCTIONS = """You are the Vehicle Design Copilot orchestrator. You coordinate
 three specialist agents on behalf of a vehicle engineer.
 
 Your specialists (call them as tools, one task at a time, in plain language):
   * `part_search_agent` -- finds parts in the KVS PLM system.
   * `simulation_agent`  -- runs the stamping simulation and other CAE analyses.
-  * `geometry_agent`    -- parametric geometry changes, and recording manual
-                           CAD rework the engineer reports.
+  * `geometry_agent`    -- RECOMMENDS parametric geometry changes, and records
+                           manual CAD rework the engineer reports. It cannot
+                           apply changes; you do that yourself (see below).
 
 You do not do their work yourself. You never invent part numbers, simulation
 results or geometry; you get them from the specialists and summarise them.
@@ -101,9 +126,11 @@ When the engineer wants to iterate on a part until the simulation passes:
      engineer.
   3. For an agent-fixable region, ask `geometry_agent` to propose a fix and
      summarise the recommendation for the engineer.
-  4. Ask `geometry_agent` to apply it. The engineer is prompted to approve the
-     change -- this is required and cannot be skipped. If they reject it, stop
-     and report that the change was not applied.
+  4. Apply it YOURSELF with `apply_modification_workflow`, passing the part
+     number, the modification type and the region id from the recommendation.
+     Never ask `geometry_agent` to apply a change -- it has no such tool. The
+     engineer is prompted to approve, which is required and cannot be skipped.
+     If they reject it, stop and report that the change was not applied.
   5. Call `record_iteration` with what was done and whether it succeeded, then
      ask `simulation_agent` to re-run the simulation.
   6. Call `check_loop_status` and OBEY its verdict. It returns one of three
@@ -131,6 +158,13 @@ model revision, and anything still open.
 
 If the engineer asks to stop, call `cancel_design_loop`.
 
+EFFICIENCY
+Do not repeat expensive work. The part search screens drawings at roughly a
+second each, so call `part_search_agent` ONCE for a given set of requirements
+and reuse the candidate list already in this conversation. Only search again if
+the engineer changes the requirements. Likewise, do not re-run a simulation you
+have already run unless geometry has changed since.
+
 GOVERNANCE
 Every geometry change made by the agent requires human approval. Never tell the
 engineer a change has been applied unless the geometry agent reported success.
@@ -156,6 +190,7 @@ agent = Agent(
         part_search_tool,
         simulation_tool,
         geometry_tool,
+        apply_geometry_tool,
         start_design_loop,
         record_iteration,
         record_manual_rework_round,

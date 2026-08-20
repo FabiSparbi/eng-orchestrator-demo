@@ -19,20 +19,30 @@ from pathlib import Path
 from agent_framework import Agent, MCPStdioTool
 
 from common.llm_client import get_shared_chat_client
-from tools.drawing_analysis import analyze_drawing, run_fine_search
+from tools.drawing_analysis import run_fine_search
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # The MCP integration point. The agent does not import the server's code; it
 # launches it as a subprocess and speaks MCP to it over stdio.
+#
+# TOOL SURFACE IS DELIBERATELY NARROW.
+# The server also exposes `fetch_drawing_ocr`, which returns ONE part's drawing
+# text. Offering that to the model alongside the batch fine search invites it to
+# loop over candidates one at a time -- eight sequential calls for an eight-part
+# batch, each with the full OCR latency, which is what "the search agent keeps
+# getting called" looks like from the UI. `allowed_tools` keeps the per-drawing
+# entry point off the model's menu; drawings are reached only through
+# `run_fine_search`, which handles the whole batch in one call.
 kvs_mcp = MCPStdioTool(
     name="kvs",
     command=sys.executable,
     args=[str(REPO_ROOT / "mcp_servers" / "kvs_mcp_server.py")],
+    allowed_tools=["search_kvs_coarse", "get_part_record"],
     description=(
         "Mock KVS PLM system. Coarse attribute search over the part catalog "
-        "(component class, weight, creation date, vehicle model), part master "
-        "records, and drawing document retrieval."
+        "(component class, weight, creation date, vehicle model) and part "
+        "master records."
     ),
 )
 
@@ -54,10 +64,14 @@ Always search in two stages, in this order:
    claim anything about a soft foot from coarse results.
 
 2. FINE SEARCH (`run_fine_search`), passing ALL the part numbers the coarse
-   search returned, in one call. This retrieves each drawing and OCRs it, then
-   applies the soft-foot rule. It is slow by nature -- roughly a second per
-   drawing -- so call it once with the whole batch, never once per part. Use
-   `analyze_drawing` only when the engineer asks about one specific part.
+   search returned in ONE call. It retrieves each drawing, OCRs it and applies
+   the soft-foot rule.
+
+   Call it exactly once per batch. It costs roughly a second per drawing, so
+   calling it repeatedly, or once per part, wastes the engineer's time for no
+   extra information. It is also the ONLY way to reach drawing data -- there is
+   no per-part drawing tool. To check a single part, pass a one-element list.
+   Never call it twice with the same part numbers; the result does not change.
 
    THE SOFT-FOOT RULE: a drawing showing two or more different HV hardness
    values indicates a tailored hardness profile, i.e. a soft foot. A single
@@ -83,5 +97,5 @@ agent = Agent(
     ),
     instructions=INSTRUCTIONS,
     client=get_shared_chat_client(),
-    tools=[kvs_mcp, run_fine_search, analyze_drawing],
+    tools=[kvs_mcp, run_fine_search],
 )

@@ -24,7 +24,7 @@ change can fix, a human approves it, and a CAD engineer takes the rest.
 | Tool calling | Every specialist has explicit function tools. |
 | MCP integration | KVS runs in a separate process, reached over a real stdio MCP connection: coarse part search, master records, drawing retrieval. |
 | Multi-agent orchestration | Orchestrator + 3 specialists, visible in DevUI's trace view. |
-| Human-in-the-loop governance | Two distinct human steps: `approval_mode="always_require"` gates every agent geometry change, and the loop **pauses and waits** for a CAD engineer to rework what the agent cannot. |
+| Human-in-the-loop governance | Two distinct human steps: `approval_mode="always_require"` gates every agent geometry change (owned by the Orchestrator — see below), and the loop **pauses and waits** for a CAD engineer to rework what the agent cannot. |
 | Iterative engineering validation | Simulate → recommend → approve → apply → re-simulate → hand over → re-simulate, with the continue/wait/stop decision made deterministically in `tools/loop_state.py`. |
 
 **One model deployment, four agents.** `common/llm_client.py` builds exactly one
@@ -198,7 +198,9 @@ Simulation Agent always reports that split explicitly.
 ### 4. The approval gate ⛔
 
 The Geometry Agent proposes `increase_hole_radius` on feature `HOLE_D13_5_LH`,
-6.75 mm → 8.50 mm, and lists the six regions it cannot touch.
+6.75 mm → 8.50 mm, and lists the six regions it cannot touch. The **Orchestrator**
+then applies it — the Geometry Agent recommends but has no tool that can apply
+(see [Where the approval gate lives](#where-the-approval-gate-lives)).
 
 > **Apply that change.**
 
@@ -253,6 +255,49 @@ specialists standalone; ask to stop mid-loop to trigger `user_cancelled`.
 
 ---
 
+## Where the approval gate lives
+
+`apply_modification_workflow` is gated with `approval_mode="always_require"` and
+sits on the **Orchestrator**, not on the Geometry Agent. That looks like a layering
+mistake and is in fact required for the gate to work at all.
+
+`agent.as_tool()` runs a sub-agent as a **stateless function call**. If a tool
+inside that sub-agent needs approval, the framework raises
+`UserInputRequiredException`; the sub-agent run is abandoned and the approval
+request is re-tagged with the *parent's* call id and shown to the user. Approving
+resumes the parent, which re-invokes the sub-agent **from scratch**. With no
+memory of the pending approval it repeats the same call and hits the gate again.
+
+The result is an endless approve → re-ask loop in which the change is never
+applied, and the sub-agent appears to be called over and over in the UI.
+`propagate_session=True` does not help.
+
+Putting the gated tool on the agent that owns the conversation fixes it: the
+approval response matches that agent's own function call and resumes it.
+`tests/test_approval_roundtrip.py` pins all of this down — that approving on the
+Orchestrator applies the change exactly once, that the sub-agent arrangement
+loops, and that no specialist holds a gated tool.
+
+**Division of labour:** the Geometry Agent owns the *recommendation*; the
+Orchestrator owns the *approved action*.
+
+## Keeping the specialists from looping
+
+Two structural rules, both because a tool menu is an invitation:
+
+- **No per-drawing tool on the Part Search Agent.** The KVS MCP server exposes
+  `fetch_drawing_ocr` for a single part, but `allowed_tools` keeps it off the
+  model's menu. Offered alongside the batch `run_fine_search`, it invites the
+  model to loop over candidates one at a time — eight calls and eight OCR delays
+  for an eight-part batch. Drawings are reached only through the batch tool.
+- **No gated tool inside any specialist**, per the section above.
+
+Note that `max_invocations` on a tool is *not* a usable backstop here: the
+counter is lifetime-scoped and never reset per run, so with module-level agents
+it would permanently disable a tool partway through a DevUI session.
+
+---
+
 ## What's real vs. mocked
 
 | Component | Real or mocked | Production swap-in |
@@ -263,7 +308,7 @@ specialists standalone; ask to stop mid-loop to trigger `user_cancelled`.
 | Drawing retrieval + OCR | Mocked — fabricated drawing text in `mock_data/drawing_ocr.py` | Fetch the real drawing PDF from KVS and OCR it (Azure Document Intelligence, Tesseract). |
 | Soft-foot determination | Mocked — deterministic HV rule in `tools/drawing_analysis.py` | Hand the OCR text plus the rule to a general-purpose LLM. Deliberately **not** done in this iteration, to keep the demo reproducible. |
 | Stamping simulation | Mocked — `tools/simulation_tools.py` reads the twin | Submit to the real forming solver (AutoForm / LS-DYNA) and parse results into the same schema, including the agent-fixable classification. |
-| Parametric geometry change | Mocked — `tools/geometry_tools.py` mutates an in-memory twin | Call the real CATIA/NX automation service. **The approval gate stays exactly where it is.** |
+| Parametric geometry change | Mocked — `tools/geometry_tools.py` mutates an in-memory twin | Call the real CATIA/NX automation service. **The approval gate stays exactly where it is** — on the Orchestrator. |
 | Manual CAD rework | Mocked — the engineer's chat confirmation clears the regions | Same handover, but the engineer's actual CATIA revision would be checked back into PLM and re-simulated. |
 | Agent hosting | Local process + DevUI | Deploy these same agents to Foundry Agent Service. |
 
@@ -296,11 +341,11 @@ tools/
 agents/
   part_search/agent.py          Coarse (MCP) + fine search
   simulation/agent.py           CAE analyses and the fixability split
-  geometry/agent.py             Carries the approval gate
-  orchestrator/agent.py         Wires the specialists via .as_tool()
+  geometry/agent.py             Recommends changes; cannot apply them
+  orchestrator/agent.py         Wires specialists via .as_tool(); owns the gate
 run_devui.py                    Registers all four agents in DevUI
 offline_demo.py                 Walk-through mechanics without Azure
-tests/                          68 tests; no credentials required
+tests/                          75 tests; no credentials required
 ```
 
 ---
@@ -321,6 +366,9 @@ Assumptions made in building this — flagged rather than silently adopted:
 - **The soft-foot rule is approximate.** "Two different HV values" is a working
   heuristic, not a validated engineering definition. It is isolated in one
   function so it can be corrected.
+- **The gate sits on the Orchestrator**, not the Geometry Agent, because a gated
+  tool inside an `as_tool()` sub-agent can never complete its approval
+  round-trip. Explained above and pinned by tests.
 - **Approval on applying, not proposing.** `propose_geometry_change` is ungated
   because recommending is not changing. `record_manual_cad_rework` is also
   ungated: it records work a human says they already did, and the gate exists to
