@@ -1,0 +1,125 @@
+{
+  "_comment": "Synthetic ePLM part catalog. Stands in for a real ePLM/PLM query API. Coarse-searchable attributes ONLY (material, weight, publication date) plus drawing references used later by the fine drawing-analysis step.",
+  "parts": [
+    {
+      "partNumber": "BR-2201",
+      "name": "Front Suspension Mounting Bracket",
+      "material": "steel",
+      "materialGrade": "DC04",
+      "weightKg": 2.85,
+      "publishedDate": "2019-04-12",
+      "program": "Model X",
+      "drawingRef": "DRW-BR-2201-C",
+      "status": "released",
+      "supplier": "Werk Nord"
+    },
+    {
+      "partNumber": "BR-3310",
+      "name": "Front Suspension Bracket, Lightweight",
+      "material": "aluminium",
+      "materialGrade": "AA5754",
+      "weightKg": 1.62,
+      "publishedDate": "2023-09-02",
+      "program": "Model Y",
+      "drawingRef": "DRW-BR-3310-A",
+      "status": "released",
+      "supplier": "Werk Sued"
+    },
+    {
+      "partNumber": "BR-3412",
+      "name": "Suspension Bracket, HSS Variant",
+      "material": "steel",
+      "materialGrade": "HX340LAD",
+      "weightKg": 2.05,
+      "publishedDate": "2022-11-18",
+      "program": "Model Y",
+      "drawingRef": "DRW-BR-3412-B",
+      "status": "released",
+      "supplier": "Werk Nord"
+    },
+    {
+      "partNumber": "BR-4120",
+      "name": "Chassis Bracket, Magnesium Prototype",
+      "material": "magnesium",
+      "materialGrade": "AZ91D",
+      "weightKg": 1.10,
+      "publishedDate": "2024-06-27",
+      "program": "Advanced Engineering",
+      "drawingRef": "DRW-BR-4120-A",
+      "status": "prototype",
+      "supplier": "Werk Ost"
+    },
+    {
+      "partNumber": "BR-2890",
+      "name": "Rear Damper Bracket",
+      "material": "steel",
+      "materialGrade": "DC04",
+      "weightKg": 3.40,
+      "publishedDate": "2020-02-05",
+      "program": "Model X",
+      "drawingRef": "DRW-BR-2890-D",
+      "status": "released",
+      "supplier": "Werk Nord"
+    },
+    {
+      "partNumber": "BR-5501",
+      "name": "Front Suspension Bracket, Al Casting",
+      "material": "aluminium",
+      "materialGrade": "AlSi10Mg",
+      "weightKg": 1.95,
+      "publishedDate": "2024-01-15",
+      "program": "Model X",
+      "drawingRef": "DRW-BR-5501-A",
+      "status": "released",
+      "supplier": "Werk Sued"
+    },
+    {
+      "partNumber": "BR-6002",
+      "name": "Subframe Tie Bracket",
+      "material": "aluminium",
+      "materialGrade": "AA6082",
+      "weightKg": 2.20,
+      "publishedDate": "2021-07-30",
+      "program": "Model Z",
+      "drawingRef": "DRW-BR-6002-B",
+      "status": "released",
+      "supplier": "Werk Ost"
+    },
+    {
+      "partNumber": "BR-7150",
+      "name": "Battery Tray Support Bracket",
+      "material": "aluminium",
+      "materialGrade": "AA6061",
+      "weightKg": 1.48,
+      "publishedDate": "2025-03-11",
+      "program": "Model Z",
+      "drawingRef": "DRW-BR-7150-A",
+      "status": "released",
+      "supplier": "Werk Sued"
+    },
+    {
+      "partNumber": "BR-8021",
+      "name": "Composite Reinforcement Bracket",
+      "material": "cfrp",
+      "materialGrade": "CF-PA6",
+      "weightKg": 0.85,
+      "publishedDate": "2025-08-04",
+      "program": "Advanced Engineering",
+      "drawingRef": "DRW-BR-8021-A",
+      "status": "prototype",
+      "supplier": "Werk Ost"
+    },
+    {
+      "partNumber": "BR-1180",
+      "name": "Legacy Engine Mount Bracket",
+      "material": "steel",
+      "materialGrade": "S355",
+      "weightKg": 4.60,
+      "publishedDate": "2016-05-20",
+      "program": "Legacy",
+      "drawingRef": "DRW-BR-1180-F",
+      "status": "obsolete",
+      "supplier": "Werk Nord"
+    }
+  ]
+}
