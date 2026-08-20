@@ -33,7 +33,12 @@ def _session(part_id: str) -> dict[str, Any] | None:
     return _SESSIONS.get(part_id.strip().upper())
 
 
-def start_design_loop(part_id: str, max_iterations: int = DEFAULT_MAX_ITERATIONS, goal: str | None = None) -> dict[str, Any]:
+def start_design_loop(
+    part_id: str,
+    max_iterations: int = DEFAULT_MAX_ITERATIONS,
+    goal: str | None = None,
+    analysis_type: str | None = None,
+) -> dict[str, Any]:
     """Open a design-iteration session for a part and reset its counter.
 
     Call this once, before the first simulate -> recommend -> approve -> apply
@@ -44,22 +49,34 @@ def start_design_loop(part_id: str, max_iterations: int = DEFAULT_MAX_ITERATIONS
         max_iterations: Hard cap on iterations before the loop stops. Default 5.
         goal: Optional plain-language statement of what the loop is trying to
             achieve, echoed back in status reports.
+        analysis_type: Optional scope -- "stiffness", "modal" or "stampability".
+            Set this when the engineer is iterating on ONE analysis, so the loop
+            converges once that analysis passes. Leave unset to require all
+            three analyses to pass before reporting convergence.
 
     Returns:
         The new session state.
     """
     part_id = part_id.strip().upper()
+    scope = analysis_type.strip().lower() if analysis_type else None
+    if scope and scope not in twin.ANALYSIS_TYPES:
+        return {"error": f"Unknown analysis type '{analysis_type}'. Expected one of {list(twin.ANALYSIS_TYPES)}."}
     _SESSIONS[part_id] = {
         "partId": part_id,
         "iteration": 0,
         "maxIterations": int(max_iterations),
         "goal": goal,
+        "analysisType": scope,
         "active": True,
         "terminationReason": None,
         "startedAtUtc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "history": [],
     }
-    return {**_SESSIONS[part_id], "message": f"Design loop started for {part_id} (max {max_iterations} iterations)."}
+    scope_text = f" scoped to {scope}" if scope else " across all analyses"
+    return {
+        **_SESSIONS[part_id],
+        "message": f"Design loop started for {part_id}{scope_text} (max {max_iterations} iterations).",
+    }
 
 
 def record_iteration(part_id: str, action: str, outcome: str, detail: str | None = None) -> dict[str, Any]:
@@ -156,14 +173,21 @@ def check_loop_status(part_id: str) -> dict[str, Any]:
         }
 
     overview = get_analysis_overview(part_id)
+    scope = session.get("analysisType")
+    # Count only what this loop is responsible for. A loop scoped to
+    # stampability must converge when stampability passes, even if stiffness
+    # still has open regions the engineer did not ask about.
+    open_criticals = (
+        overview["byAnalysis"][scope]["criticalAreas"] if scope else overview["totalCriticalAreas"]
+    )
 
     # Already-terminated loops (user cancel / workflow failure) stay terminated.
     if not session["active"]:
         reason = session["terminationReason"] or "stopped"
         return _verdict(session, overview, False, reason)
 
-    # Condition 1: nothing critical left anywhere.
-    if overview["totalCriticalAreas"] == 0:
+    # Condition 1: nothing critical left in this loop's scope.
+    if open_criticals == 0:
         session["active"] = False
         session["terminationReason"] = "converged"
         return _verdict(session, overview, False, "converged")
@@ -187,19 +211,26 @@ _MESSAGES = {
 
 
 def _verdict(session: dict[str, Any], overview: dict[str, Any], should_continue: bool, reason: str | None) -> dict[str, Any]:
+    scope = session.get("analysisType")
+    open_criticals = (
+        overview["byAnalysis"][scope]["criticalAreas"] if scope else overview["totalCriticalAreas"]
+    )
     return {
         "partId": session["partId"],
+        "analysisScope": scope or "all",
         "shouldContinue": should_continue,
         "iteration": session["iteration"],
         "maxIterations": session["maxIterations"],
         "iterationsRemaining": max(0, session["maxIterations"] - session["iteration"]),
         "terminationReason": reason,
-        "criticalAreasRemaining": overview["totalCriticalAreas"],
+        "criticalAreasRemaining": open_criticals,
+        "criticalAreasAllAnalyses": overview["totalCriticalAreas"],
         "byAnalysis": overview["byAnalysis"],
         "modificationsApplied": overview["modificationsApplied"],
         "message": _MESSAGES.get(reason or "", "")
-        or f"Loop continues: {overview['totalCriticalAreas']} critical region(s) still open, "
-        f"iteration {session['iteration']} of {session['maxIterations']}.",
+        or f"Loop continues: {open_criticals} critical region(s) still open"
+        + (f" for {scope}" if scope else "")
+        + f", iteration {session['iteration']} of {session['maxIterations']}.",
     }
 
 
@@ -215,6 +246,7 @@ def get_loop_history(part_id: str) -> dict[str, Any]:
     return {
         "partId": session["partId"],
         "goal": session["goal"],
+        "analysisScope": session.get("analysisType") or "all",
         "iterationsCompleted": session["iteration"],
         "maxIterations": session["maxIterations"],
         "active": session["active"],

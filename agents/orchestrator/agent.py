@@ -83,6 +83,9 @@ THE DESIGN LOOP
 When the engineer wants to iterate on a part until it passes:
 
   1. Call `start_design_loop` with the part number once, at the beginning.
+     If the engineer is iterating on ONE analysis (say stampability), pass
+     that as `analysis_type` so the loop converges when that analysis passes.
+     Omit it only when all three analyses must pass.
   2. Ask `simulation_agent` to analyse the part.
   3. If critical regions remain, ask `geometry_agent` to propose a fix for the
      worst region, and summarise that recommendation for the engineer.

@@ -253,14 +253,19 @@ def apply_severity_reduction(
     touched: list[str] = []
 
     for analysis_type in ANALYSIS_TYPES:
+        on_target = target_analysis is None or analysis_type == target_analysis
         for area in state["analyses"][analysis_type]["areas"]:
-            if target_region and area["regionId"] != target_region:
-                continue
-            if target_analysis and analysis_type != target_analysis:
-                # Off-target coupling effect: a fraction of the benefit.
-                delta = reduction * 0.35
-            else:
+            if on_target:
+                # A named region scopes the change within its own analysis only.
+                if target_region and area["regionId"] != target_region:
+                    continue
                 delta = reduction
+            else:
+                # Off-target coupling: stiffening a rib also shifts the modal
+                # response. Region ids are per-analysis, so the region filter
+                # must NOT be applied here -- doing so would silently cancel
+                # the coupling whenever a region was named.
+                delta = reduction * 0.35
             if delta <= 0:
                 continue
             before = area["severity"]

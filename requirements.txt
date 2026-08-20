@@ -1,0 +1,18 @@
+# Verified working set for this demo (Python 3.11).
+#
+# Two constraints matter and are easy to get wrong:
+#   * mcp must stay <2 -- agent-framework-core's MCP client is not compatible
+#     with the mcp SDK 2.x handshake (InitializeResult.protocolVersion moved).
+#   * the Foundry integration is `agent-framework-foundry` (class
+#     FoundryChatClient). The older `agent-framework-azure-ai` preview
+#     (AzureAIAgentClient) is stale and does not import against core 1.14.
+agent-framework-core==1.14.0
+agent-framework-foundry==1.11.0
+agent-framework-devui==1.0.0b260813
+mcp>=1.24.0,<2
+azure-identity==1.25.3
+python-dotenv==1.2.3
+
+# Tests only
+pytest==9.1.1
+pytest-asyncio==1.4.0

@@ -10,7 +10,6 @@ Run:  .venv/bin/python -m pytest tests/ -v
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -92,36 +91,40 @@ def test_coarse_search_returns_nothing_for_impossible_filter():
     assert fn(material="unobtainium")["matchCount"] == 0
 
 
-def test_mcp_server_starts_and_lists_tools_over_stdio():
-    """The MCP server is a real MCP server, not just an importable module."""
-    request = (
-        json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "test", "version": "1.0"},
-                },
-            }
-        )
-        + "\n"
-        + json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        + "\n"
-        + json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        + "\n"
+@pytest.mark.asyncio
+async def test_mcp_server_speaks_mcp_over_stdio():
+    """The ePLM server is a real MCP server, not just an importable module.
+
+    Uses the MCP client library so the handshake is driven by the protocol
+    itself -- piping raw JSON-RPC and reading after exit races the server's
+    reply against stdin EOF, which made an earlier version of this test flaky.
+    """
+    from mcp import ClientSession, StdioServerParameters  # noqa: PLC0415
+    from mcp.client.stdio import stdio_client  # noqa: PLC0415
+
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=[str(REPO_ROOT / "mcp_servers" / "eplm_mcp_server.py")],
+        cwd=str(REPO_ROOT),
     )
-    proc = subprocess.run(
-        [sys.executable, "mcp_servers/eplm_mcp_server.py"],
-        input=request,
-        capture_output=True,
-        text=True,
-        cwd=REPO_ROOT,
-        timeout=90,
-    )
-    assert "search_eplm_coarse" in proc.stdout, f"stdout={proc.stdout[:500]} stderr={proc.stderr[-500:]}"
+
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            listed = await session.list_tools()
+            names = {t.name for t in listed.tools}
+            assert "search_eplm_coarse" in names
+            assert "get_part_record" in names
+
+            called = await session.call_tool(
+                "search_eplm_coarse", {"material": "aluminium", "max_weight_kg": 2.0}
+            )
+            payload = json.loads(called.content[0].text)
+            assert payload["matchCount"] > 0
+            for part in payload["parts"]:
+                assert part["material"] == "aluminium"
+                assert part["weightKg"] <= 2.0
 
 
 # --------------------------------------------------------------------------
@@ -394,3 +397,72 @@ def test_loop_history_is_recorded():
     assert history["goal"] == "reduce mass"
     assert history["iterationsCompleted"] == 1
     assert history["history"][0]["action"] == "increase_fillet_radius"
+
+
+# --------------------------------------------------------------------------
+# Loop scoping (regression: a single-analysis loop must be able to converge)
+# --------------------------------------------------------------------------
+
+def test_scoped_loop_converges_when_its_own_analysis_passes():
+    """A loop scoped to stampability converges even if stiffness is still open."""
+    loop_state.start_design_loop("BR-3310", analysis_type="stampability")
+    for _ in range(4):
+        if not twin.critical_areas("BR-3310", "stampability"):
+            break
+        proposal = propose_geometry_change("BR-3310", "stampability")["proposal"]
+        apply_modification_workflow(
+            "BR-3310", proposal["modificationType"], "stampability", proposal["targetRegion"]
+        )
+    status = loop_state.check_loop_status("BR-3310")
+    assert status["analysisScope"] == "stampability"
+    assert status["criticalAreasRemaining"] == 0
+    assert status["terminationReason"] == "converged"
+
+
+def test_unscoped_loop_still_requires_every_analysis():
+    """Without a scope, one passing analysis must not end the loop."""
+    loop_state.start_design_loop("BR-3310")
+    for _ in range(4):
+        if not twin.critical_areas("BR-3310", "stampability"):
+            break
+        proposal = propose_geometry_change("BR-3310", "stampability")["proposal"]
+        apply_modification_workflow(
+            "BR-3310", proposal["modificationType"], "stampability", proposal["targetRegion"]
+        )
+    assert run_stampability_analysis("BR-3310")["status"] == "pass"
+    status = loop_state.check_loop_status("BR-3310")
+    assert status["analysisScope"] == "all"
+    # Other analyses may or may not have cleared via coupling; either way the
+    # scope reported must cover all three, not just stampability.
+    assert status["criticalAreasRemaining"] == status["criticalAreasAllAnalyses"]
+
+
+def test_start_design_loop_rejects_unknown_scope():
+    result = loop_state.start_design_loop("BR-3310", analysis_type="telepathy")
+    assert "error" in result
+
+
+def test_targeted_modification_still_couples_into_other_analyses():
+    """Regression: naming a region must not cancel the cross-analysis coupling.
+
+    Region ids are per-analysis, so filtering every analysis by the target
+    region id used to leave the other analyses completely untouched.
+    """
+    stiffness_before = twin.max_severity("BR-3310", "stiffness")
+    result = apply_modification_workflow(
+        "BR-3310", "increase_fillet_radius", "stampability", "R-STP-01"
+    )
+    assert result["status"] == "success"
+    assert twin.max_severity("BR-3310", "stiffness") < stiffness_before
+
+
+def test_targeted_modification_only_hits_its_own_region_within_its_analysis():
+    """The region filter still scopes precisely inside the targeted analysis."""
+    other_before = next(
+        a["severity"] for a in twin.critical_areas("BR-3310", "stampability") if a["regionId"] == "R-STP-02"
+    )
+    apply_modification_workflow("BR-3310", "increase_fillet_radius", "stampability", "R-STP-01")
+    other_after = next(
+        a["severity"] for a in twin.critical_areas("BR-3310", "stampability") if a["regionId"] == "R-STP-02"
+    )
+    assert other_after == other_before
