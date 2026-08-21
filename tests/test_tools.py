@@ -505,10 +505,12 @@ def test_start_design_loop_rejects_unknown_scope():
     assert "error" in loop_state.start_design_loop(HERO, analysis_type="telepathy")
 
 
-def test_check_status_without_a_loop_is_safe():
+def test_check_status_on_an_unknown_part_is_safe():
+    """No session yet is not an error -- it opens one (see auto-open tests)."""
     status = loop_state.check_loop_status("99Z.507.000")
-    assert status["shouldContinue"] is False
-    assert status["terminationReason"] == "no_active_loop"
+    assert status["partId"] == "99Z.507.000"
+    assert status["terminationReason"] != "no_active_loop"
+    assert isinstance(status["shouldContinue"], bool)
 
 
 def test_loop_history_records_agent_and_manual_steps():
@@ -582,3 +584,68 @@ async def test_kvs_server_speaks_mcp_over_stdio():
             drawing = await session.call_tool("fetch_drawing_ocr", {"part_number": HERO})
             ocr = json.loads(drawing.content[0].text)
             assert any("HV" in line for line in ocr["ocrText"])
+
+
+# --------------------------------------------------------------------------
+# Repeated setup calls must not destroy progress
+# --------------------------------------------------------------------------
+
+def test_start_design_loop_is_idempotent():
+    """A second call must not reset the counter.
+
+    A model that re-issues this call used to silently wipe the iteration count
+    and history, so `max_iterations_reached` could never fire and the loop was
+    unbounded. Observed in DevUI as many identical start_design_loop calls all
+    reporting iteration 0.
+    """
+    loop_state.start_design_loop(HERO)
+    loop_state.record_iteration(HERO, "hole fix", "success")
+
+    repeat = loop_state.start_design_loop(HERO)
+
+    assert repeat["alreadyRunning"] is True
+    assert repeat["iteration"] == 1, "progress was reset by the repeat call"
+    assert "Nothing was reset" in repeat["message"]
+    assert "do not call start_design_loop again" in repeat["nextAction"].lower()
+    assert loop_state.get_loop_history(HERO)["history"], "history was wiped"
+
+
+def test_repeated_starts_cannot_defeat_the_iteration_cap():
+    """The cap must still fire even if the loop is re-started every iteration."""
+    loop_state.start_design_loop(HERO, max_iterations=2)
+    for i in range(2):
+        loop_state.start_design_loop(HERO)          # model re-issues setup
+        loop_state.record_iteration(HERO, f"mod {i}", "success")
+    status = loop_state.check_loop_status(HERO)
+    assert status["terminated"] is True
+    assert status["terminationReason"] == "max_iterations_reached"
+
+
+def test_a_finished_loop_can_be_restarted():
+    """Idempotence must not make a completed loop impossible to run again."""
+    loop_state.start_design_loop(HERO)
+    loop_state.cancel_design_loop(HERO, reason="done for now")
+    restarted = loop_state.start_design_loop(HERO)
+    assert restarted["alreadyRunning"] is False
+    assert restarted["iteration"] == 0
+    assert loop_state.check_loop_status(HERO)["terminated"] is False
+
+
+def test_start_result_tells_the_model_what_to_do_next():
+    result = loop_state.start_design_loop(HERO)
+    assert "nextAction" in result
+    assert "start_design_loop" in result["nextAction"]
+
+
+def test_check_loop_status_opens_a_session_when_none_exists():
+    """Tool order must not matter; requiring setup first is a trap for a model."""
+    status = loop_state.check_loop_status(HERO)
+    assert status["terminationReason"] != "no_active_loop"
+    assert status["analysisScope"] == "stamping"
+    assert status["shouldContinue"] is True
+
+
+def test_auto_opened_session_behaves_like_a_started_one():
+    loop_state.check_loop_status(HERO)
+    loop_state.record_iteration(HERO, "hole fix", "success")
+    assert loop_state.check_loop_status(HERO)["iteration"] == 1

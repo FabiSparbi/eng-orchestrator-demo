@@ -39,6 +39,9 @@ from dotenv import load_dotenv
 # Optional convenience only -- the demo must run from exported shell vars alone.
 load_dotenv(override=False)
 
+# Ceiling on tool calls within a single agent run -- see get_shared_chat_client.
+MAX_FUNCTION_CALLS_PER_RUN = 30
+
 ENDPOINT_VARS = ("AZURE_AI_PROJECT_ENDPOINT", "FOUNDRY_PROJECT_ENDPOINT")
 MODEL_VARS = ("AZURE_AI_MODEL_DEPLOYMENT_NAME", "FOUNDRY_MODEL")
 
@@ -84,6 +87,13 @@ def get_shared_chat_client() -> FoundryChatClient:
         project_endpoint=endpoint,
         model=model,
         credential=DefaultAzureCredential(),
+        # Backstop against a runaway tool loop. The framework's own default is
+        # 40 model round-trips with UNLIMITED calls per round-trip, so a model
+        # that gets stuck re-issuing one tool can rack up hundreds of identical
+        # calls before anything stops it. The full demo flow needs well under 30
+        # calls in a single run, so this bounds the damage without constraining
+        # anything legitimate. Raise it if a longer flow is added.
+        function_invocation_configuration={"max_function_calls": MAX_FUNCTION_CALLS_PER_RUN},
     )
 
 

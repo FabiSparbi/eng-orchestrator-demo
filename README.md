@@ -292,9 +292,22 @@ Two structural rules, both because a tool menu is an invitation:
   for an eight-part batch. Drawings are reached only through the batch tool.
 - **No gated tool inside any specialist**, per the section above.
 
-Note that `max_invocations` on a tool is *not* a usable backstop here: the
-counter is lifetime-scoped and never reset per run, so with module-level agents
-it would permanently disable a tool partway through a DevUI session.
+- **Setup calls are idempotent and order-free.** `start_design_loop` returns
+  `alreadyRunning` instead of resetting, and `check_loop_status` opens a session
+  if none exists. Previously a re-issued `start_design_loop` silently wiped the
+  iteration count and history, so `max_iterations_reached` could never fire and
+  the loop was unbounded — visible in DevUI as a stream of identical
+  `start_design_loop` calls all reporting `iteration: 0`. An order-dependent
+  tool set is one a model can get stuck on.
+- **A hard ceiling on tool calls per run.** The framework defaults to 40 model
+  round-trips with *unlimited* calls per round-trip, so a stuck model can make
+  hundreds of identical calls before anything stops it. `common/llm_client.py`
+  sets `max_function_calls` to 30 — well above the full demo flow.
+
+Note that `max_invocations` on an individual tool is *not* a usable backstop
+here: the counter is lifetime-scoped and never reset per run, so with
+module-level agents it would permanently disable a tool partway through a DevUI
+session.
 
 ---
 
@@ -345,7 +358,7 @@ agents/
   orchestrator/agent.py         Wires specialists via .as_tool(); owns the gate
 run_devui.py                    Registers all four agents in DevUI
 offline_demo.py                 Walk-through mechanics without Azure
-tests/                          75 tests; no credentials required
+tests/                          81 tests; no credentials required
 ```
 
 ---

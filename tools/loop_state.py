@@ -76,6 +76,32 @@ def start_design_loop(
     if scope and scope not in twin.ANALYSIS_TYPES:
         return {"error": f"Unknown analysis type '{analysis_type}'. Expected one of {list(twin.ANALYSIS_TYPES)}."}
 
+    # IDEMPOTENT ON PURPOSE.
+    # A model that re-issues this call -- because it re-read its instructions, or
+    # lost track of what it had already done -- used to silently reset the
+    # counter and wipe the history. The iteration count could then never reach
+    # the cap, so `max_iterations_reached` could never fire and the loop was
+    # effectively unbounded. Now a repeat is a no-op that reports the live state
+    # and says what to do instead, which both preserves progress and gives the
+    # model an unambiguous signal to move on.
+    existing = _SESSIONS.get(part_id)
+    if existing and existing["active"]:
+        return {
+            "partId": part_id,
+            "alreadyRunning": True,
+            "iteration": existing["iteration"],
+            "maxIterations": existing["maxIterations"],
+            "analysisType": existing["analysisType"],
+            "message": (
+                f"A design loop for {part_id} is already running (iteration "
+                f"{existing['iteration']} of {existing['maxIterations']}). Nothing was reset."
+            ),
+            "nextAction": (
+                "Do NOT call start_design_loop again for this part. Call check_loop_status "
+                "to find out what to do next."
+            ),
+        }
+
     _SESSIONS[part_id] = {
         "partId": part_id,
         "iteration": 0,
@@ -89,8 +115,17 @@ def start_design_loop(
     }
     scope_text = f" scoped to {scope}" if scope else " across all analyses"
     return {
-        **_SESSIONS[part_id],
+        "partId": part_id,
+        "alreadyRunning": False,
+        "iteration": 0,
+        "maxIterations": int(max_iterations),
+        "analysisType": scope,
+        "goal": goal,
         "message": f"Design loop started for {part_id}{scope_text} (max {max_iterations} iterations).",
+        "nextAction": (
+            "Loop is open. Run the simulation for this part, then call check_loop_status. "
+            "Do not call start_design_loop again for this part."
+        ),
     }
 
 
@@ -202,14 +237,13 @@ def check_loop_status(part_id: str) -> dict[str, Any]:
     part_id = part_id.strip().upper()
     session = _session(part_id)
     if session is None:
-        return {
-            "partId": part_id,
-            "shouldContinue": False,
-            "terminated": True,
-            "blockedOn": None,
-            "terminationReason": "no_active_loop",
-            "message": f"No design loop is running for {part_id}. Call start_design_loop to begin one.",
-        }
+        # Open one implicitly rather than erroring. Requiring start_design_loop
+        # first makes the tools order-dependent, and an order-dependent tool set
+        # is one a model can get stuck on -- which is exactly how the repeated
+        # start_design_loop calls arose. Any entry point now works.
+        start_design_loop(part_id)
+        session = _session(part_id)
+        assert session is not None
 
     overview = get_analysis_overview(part_id)
 
