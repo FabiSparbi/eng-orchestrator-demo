@@ -281,6 +281,32 @@ loops, and that no specialist holds a gated tool.
 **Division of labour:** the Geometry Agent owns the *recommendation*; the
 Orchestrator owns the *approved action*.
 
+## Reading the DevUI trace: repeated rows are usually one call
+
+DevUI can show a single tool call as **dozens of near-identical rows**. Its
+mapper opens a new trace row every time a streamed chunk carries both a call id
+and a tool name (`_map_function_call_content`). Standard OpenAI streaming sends
+those only in the first chunk, but the Azure/Foundry path repeats them on every
+delta — so you get one row per chunk, and the row count scales with the length
+of the tool's arguments.
+
+The tell is in the arguments: successive rows show the same JSON with a
+progressively shorter leading fragment. The other tell is the result — if the
+same call really had run twice, `start_design_loop` would report
+`"alreadyRunning": true` on the second. Rows all showing `false` mean it ran once.
+
+**Ground truth is in the console, not the panel.** Every loop-tool execution
+logs `TOOL EXECUTED: <name> <part> (execution #N)`, and
+`tools/loop_state.get_tool_call_counts()` returns the real counts for the
+process. Count those before concluding an agent is looping.
+
+What is mitigated here: tool arguments are kept small, since argument length
+drives the row count directly. `start_design_loop` lost its free-text `goal`
+parameter (195 → 76 characters of arguments, so ~60% fewer rows), and the
+orchestrator is told to keep arguments brief and put its reasoning in its reply
+instead. The underlying duplication is in the DevUI mapper and the client's
+streaming, not in this repo.
+
 ## Keeping the specialists from looping
 
 Two structural rules, both because a tool menu is an invitation:

@@ -79,6 +79,11 @@ def main() -> None:
     print()
     print("All four share ONE FoundryChatClient against ONE model deployment.")
     print("Geometry changes pause for Approve/Reject in the DevUI panel.")
+    print()
+    print("Reading the trace: DevUI renders one row per streamed argument chunk when")
+    print("the model client repeats the call id on each chunk, so ONE tool call can")
+    print("appear many times. Lines below reading 'TOOL EXECUTED: ...' are the ground")
+    print("truth -- count those, not the rows in the panel.")
     print(f"\nOpening DevUI at http://{args.host}:{args.port}\n")
 
     serve(

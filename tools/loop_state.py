@@ -34,6 +34,7 @@ store behind these same functions if loops must survive restarts.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -45,6 +46,36 @@ DEFAULT_ANALYSIS = "stamping"
 
 _SESSIONS: dict[str, dict[str, Any]] = {}
 
+# Real invocation counts, for telling actual tool executions apart from UI rows.
+# DevUI renders one row per streamed argument chunk when the model client repeats
+# the call id on every chunk, so a single call can appear dozens of times in the
+# trace. These counters are the ground truth; each execution also logs at INFO,
+# so the DevUI console shows what really ran.
+_CALL_COUNTS: dict[str, int] = {}
+
+logger = logging.getLogger(__name__)
+
+
+def _record_call(tool_name: str, detail: str = "") -> int:
+    _CALL_COUNTS[tool_name] = _CALL_COUNTS.get(tool_name, 0) + 1
+    count = _CALL_COUNTS[tool_name]
+    logger.info("TOOL EXECUTED: %s%s (execution #%d)", tool_name, f" {detail}" if detail else "", count)
+    return count
+
+
+def get_tool_call_counts() -> dict[str, int]:
+    """How many times each loop tool has ACTUALLY executed this process.
+
+    Use this to check a suspicious trace: if DevUI shows a tool called 80 times
+    but this reports 1, those are render rows for one streamed call, not repeated
+    executions.
+    """
+    return dict(_CALL_COUNTS)
+
+
+def reset_tool_call_counts() -> None:
+    _CALL_COUNTS.clear()
+
 
 def _session(part_id: str) -> dict[str, Any] | None:
     return _SESSIONS.get(part_id.strip().upper())
@@ -53,7 +84,6 @@ def _session(part_id: str) -> dict[str, Any] | None:
 def start_design_loop(
     part_id: str,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
-    goal: str | None = None,
     analysis_type: str | None = DEFAULT_ANALYSIS,
 ) -> dict[str, Any]:
     """Open a design-iteration session for a part and reset its counter.
@@ -64,7 +94,6 @@ def start_design_loop(
     Args:
         part_id: Part number under design, e.g. "10A.507.109".
         max_iterations: Hard cap on agent iterations. Default 5.
-        goal: Optional plain-language statement of what the loop is for.
         analysis_type: Which analysis the loop is responsible for. Defaults to
             "stamping". Pass None to require every analysis to pass.
 
@@ -72,6 +101,7 @@ def start_design_loop(
         The new session state.
     """
     part_id = part_id.strip().upper()
+    _record_call("start_design_loop", part_id)
     scope = analysis_type.strip().lower() if analysis_type else None
     if scope and scope not in twin.ANALYSIS_TYPES:
         return {"error": f"Unknown analysis type '{analysis_type}'. Expected one of {list(twin.ANALYSIS_TYPES)}."}
@@ -106,7 +136,6 @@ def start_design_loop(
         "partId": part_id,
         "iteration": 0,
         "maxIterations": int(max_iterations),
-        "goal": goal,
         "analysisType": scope,
         "active": True,
         "terminationReason": None,
@@ -120,7 +149,6 @@ def start_design_loop(
         "iteration": 0,
         "maxIterations": int(max_iterations),
         "analysisType": scope,
-        "goal": goal,
         "message": f"Design loop started for {part_id}{scope_text} (max {max_iterations} iterations).",
         "nextAction": (
             "Loop is open. Run the simulation for this part, then call check_loop_status. "
@@ -235,6 +263,7 @@ def check_loop_status(part_id: str) -> dict[str, Any]:
         current counts of agent-fixable and engineer-only regions.
     """
     part_id = part_id.strip().upper()
+    _record_call("check_loop_status", part_id)
     session = _session(part_id)
     if session is None:
         # Open one implicitly rather than erroring. Requiring start_design_loop
@@ -357,7 +386,6 @@ def get_loop_history(part_id: str) -> dict[str, Any]:
         return {"error": f"No design loop found for {part_id.strip().upper()}."}
     return {
         "partId": session["partId"],
-        "goal": session["goal"],
         "analysisScope": session.get("analysisType") or "all",
         "iterationsCompleted": session["iteration"],
         "maxIterations": session["maxIterations"],

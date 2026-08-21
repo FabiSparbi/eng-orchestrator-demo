@@ -514,11 +514,10 @@ def test_check_status_on_an_unknown_part_is_safe():
 
 
 def test_loop_history_records_agent_and_manual_steps():
-    loop_state.start_design_loop(HERO, goal="clear stamping")
+    loop_state.start_design_loop(HERO)
     loop_state.record_iteration(HERO, "increase_hole_radius on R-STM-01", "success")
     loop_state.record_manual_rework_round(HERO, "flanges reworked")
     history = loop_state.get_loop_history(HERO)
-    assert history["goal"] == "clear stamping"
     assert history["iterationsCompleted"] == 1
     assert [h["outcome"] for h in history["history"]] == ["success", "reported"]
 

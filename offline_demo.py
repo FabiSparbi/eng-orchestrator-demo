@@ -77,7 +77,7 @@ async def main() -> None:
 
     # --- Step 3: stamping simulation ---------------------------------------
     rule(f"STEP 3  Stamping simulation on {selected}")
-    loop_state.start_design_loop(selected, goal="clear stamping criticals", analysis_type=ANALYSIS)
+    loop_state.start_design_loop(selected, max_iterations=5, analysis_type=ANALYSIS)
     result = run_stamping_simulation(selected)
     print(result["summary"] + "\n")
     for area in result["criticalAreas"]:
