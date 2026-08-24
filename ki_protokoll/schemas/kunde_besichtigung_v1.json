@@ -1,0 +1,198 @@
+{
+  "schemaId": "kunde-besichtigung",
+  "version": "1.0",
+  "titel": "Besichtigungsprotokoll",
+  "kunde": "PLATZHALTER -- hier das echte Kundenformat eintragen",
+  "hinweis": "Spalten, Pflichtangaben, erlaubte Werte und Erfassungshinweise stehen NUR hier. Ein anderes Kundenformat heisst: diese Datei ersetzen, kein Code.",
+  "minKonfidenz": 0.7,
+  "kopf": [
+    {
+      "id": "objekt",
+      "label": "Objekt",
+      "pflicht": true,
+      "typ": "text",
+      "erfassungshinweis": "Objektbezeichnung aus dem Auftrag.",
+      "empfohleneErfassung": "Textnotiz",
+      "extraktion": {"strategie": "metadaten", "feld": "objekt"}
+    },
+    {
+      "id": "adresse",
+      "label": "Adresse",
+      "pflicht": true,
+      "typ": "text",
+      "erfassungshinweis": "Strasse, PLZ und Ort des besichtigten Objekts.",
+      "empfohleneErfassung": "Textnotiz",
+      "extraktion": {"strategie": "metadaten", "feld": "adresse"}
+    },
+    {
+      "id": "besichtigungsdatum",
+      "label": "Datum der Besichtigung",
+      "pflicht": true,
+      "typ": "datum",
+      "erfassungshinweis": "Datum der Begehung.",
+      "empfohleneErfassung": "Textnotiz",
+      "extraktion": {"strategie": "metadaten", "feld": "datum"}
+    },
+    {
+      "id": "teilnehmer",
+      "label": "Teilnehmer",
+      "pflicht": true,
+      "typ": "text",
+      "erfassungshinweis": "Wer war bei der Begehung anwesend (Name und Rolle)?",
+      "empfohleneErfassung": "Sprachnotiz",
+      "extraktion": {
+        "strategie": "kopf_muster",
+        "muster": "(?:teilnehmer|anwesend(?:\\s+war(?:en)?)?)\\s*(?:sind|waren|war|:)?\\s*([^.;\\n]+)"
+      }
+    },
+    {
+      "id": "auftragsnummer",
+      "label": "Auftragsnummer",
+      "pflicht": true,
+      "typ": "text",
+      "erfassungshinweis": "Auftragsnummer des Kunden, Format JJJJ-NNN.",
+      "empfohleneErfassung": "Textnotiz",
+      "extraktion": {
+        "strategie": "kopf_muster",
+        "muster": "auftrag(?:s)?(?:nummer|nr\\.?)?\\s*[:\\-]?\\s*(\\d{4}-\\d{2,4})"
+      }
+    }
+  ],
+  "positionen": [
+    {
+      "id": "pos",
+      "label": "Pos.",
+      "pflicht": true,
+      "typ": "zahl",
+      "erfassungshinweis": "Wird vom System vergeben.",
+      "extraktion": {"strategie": "laufende_nummer"}
+    },
+    {
+      "id": "raum",
+      "label": "Raum / Bereich",
+      "pflicht": true,
+      "typ": "text",
+      "erfassungshinweis": "Raum bei der Aufnahme in der App setzen.",
+      "empfohleneErfassung": "Textnotiz",
+      "extraktion": {"strategie": "positionsfeld", "teil": 0}
+    },
+    {
+      "id": "bauteil",
+      "label": "Bauteil",
+      "pflicht": true,
+      "typ": "text",
+      "erfassungshinweis": "Bauteil bei der Aufnahme in der App setzen.",
+      "empfohleneErfassung": "Textnotiz",
+      "extraktion": {"strategie": "positionsfeld", "teil": 1}
+    },
+    {
+      "id": "zustand",
+      "label": "Zustand",
+      "pflicht": true,
+      "typ": "auswahl",
+      "erlaubteWerte": ["neuwertig", "Gebrauchsspuren", "beschaedigt", "defekt"],
+      "erfassungshinweis": "Eine klare Zustandsaussage zur Position, z. B. \"Fensterbank beschaedigt\".",
+      "empfohleneErfassung": "Sprachnotiz",
+      "extraktion": {
+        "strategie": "auswahl_synonyme",
+        "synonyme": {
+          "neuwertig": ["neuwertig", "einwandfrei", "ohne befund", "wie neu"],
+          "Gebrauchsspuren": ["gebrauchsspuren", "abgenutzt", "kratzer", "verschlissen", "abgewohnt"],
+          "beschaedigt": ["beschaedigt", "beschädigt", "riss", "risse", "gerissen", "sprung", "abgeplatzt", "lose", "undicht", "schimmel"],
+          "defekt": ["defekt", "kaputt", "funktionslos", "nicht funktionsfaehig", "gebrochen", "ausgefallen"]
+        }
+      }
+    },
+    {
+      "id": "feststellung",
+      "label": "Feststellung / Mangel",
+      "pflicht": true,
+      "typ": "text",
+      "erfassungshinweis": "Was genau ist auffaellig? Ein Satz je Position.",
+      "empfohleneErfassung": "Sprachnotiz",
+      "extraktion": {
+        "strategie": "stichwort_satz",
+        "stichworte": ["riss", "risse", "undicht", "schimmel", "defekt", "lose", "fehlt", "beschaedigt", "beschädigt", "verschmutzt", "abgeplatzt", "kratzer", "wackelt", "klemmt", "zugig"]
+      }
+    },
+    {
+      "id": "menge",
+      "label": "Menge",
+      "pflicht": true,
+      "typ": "zahl",
+      "erfassungshinweis": "Aufmass zur Position nennen, z. B. \"ca. 4,5 Quadratmeter\" oder \"3 Stueck\".",
+      "empfohleneErfassung": "Sprachnotiz",
+      "extraktion": {
+        "strategie": "muster",
+        "muster": "(\\d+(?:[.,]\\d+)?)\\s*(m²|m2|qm|quadratmeter|lfdm|lfd\\.?\\s*m|laufmeter|stk\\.?|stueck|stück|st\\.)",
+        "gruppe": 1
+      }
+    },
+    {
+      "id": "einheit",
+      "label": "Einheit",
+      "pflicht": true,
+      "typ": "auswahl",
+      "erlaubteWerte": ["m²", "lfdm", "Stk", "psch"],
+      "erfassungshinweis": "Ergibt sich aus dem Aufmass (m², lfdm, Stk).",
+      "empfohleneErfassung": "Sprachnotiz",
+      "extraktion": {
+        "strategie": "muster",
+        "muster": "(\\d+(?:[.,]\\d+)?)\\s*(m²|m2|qm|quadratmeter|lfdm|lfd\\.?\\s*m|laufmeter|stk\\.?|stueck|stück|st\\.)",
+        "gruppe": 2,
+        "normalisierung": {
+          "m2": "m²",
+          "qm": "m²",
+          "quadratmeter": "m²",
+          "lfd m": "lfdm",
+          "lfd. m": "lfdm",
+          "laufmeter": "lfdm",
+          "stk": "Stk",
+          "stk.": "Stk",
+          "stueck": "Stk",
+          "stück": "Stk",
+          "st.": "Stk"
+        }
+      }
+    },
+    {
+      "id": "massnahme",
+      "label": "Massnahme",
+      "pflicht": true,
+      "typ": "text",
+      "erfassungshinweis": "Was soll passieren? z. B. \"Fuge erneuern\", \"Handlauf nachbefestigen\".",
+      "empfohleneErfassung": "Sprachnotiz",
+      "extraktion": {
+        "strategie": "stichwort_satz",
+        "stichworte": ["erneuer", "austausch", "ausgetauscht", "ersetz", "ausbesser", "abdicht", "abgedichtet", "streich", "reinig", "nachjustier", "nachbefestig", "abschleif", "sanier", "instandsetz"]
+      }
+    },
+    {
+      "id": "prioritaet",
+      "label": "Prioritaet",
+      "pflicht": true,
+      "typ": "auswahl",
+      "erlaubteWerte": ["sofort", "kurzfristig", "mittelfristig", "keine"],
+      "erfassungshinweis": "Dringlichkeit nennen, z. B. \"muss sofort gemacht werden\" oder \"kann warten\".",
+      "empfohleneErfassung": "Sprachnotiz",
+      "extraktion": {
+        "strategie": "auswahl_synonyme",
+        "synonyme": {
+          "sofort": ["sofort", "dringend", "gefahr", "sicherheitsrelevant", "unverzueglich", "umgehend"],
+          "kurzfristig": ["kurzfristig", "zeitnah", "in den naechsten wochen", "bald"],
+          "mittelfristig": ["mittelfristig", "kann warten", "im naechsten jahr", "spaeter"],
+          "keine": ["keine massnahme", "nicht erforderlich", "kein handlungsbedarf"]
+        }
+      }
+    },
+    {
+      "id": "foto",
+      "label": "Foto-Nr.",
+      "pflicht": true,
+      "typ": "text",
+      "erfassungshinweis": "Mindestens ein Foto der Position aufnehmen.",
+      "empfohleneErfassung": "Foto",
+      "extraktion": {"strategie": "foto_referenz"}
+    }
+  ]
+}

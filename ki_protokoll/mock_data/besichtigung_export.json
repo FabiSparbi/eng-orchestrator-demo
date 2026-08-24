@@ -1,0 +1,49 @@
+{
+  "besichtigungId": "BES-2026-0087",
+  "stammdaten": {
+    "objekt": "MFH Lindenstrasse 12, Wohnung 3",
+    "adresse": "Lindenstrasse 12, 40217 Duesseldorf",
+    "datum": "2026-08-24",
+    "aufnehmer": "F. Sparbrodt"
+  },
+  "hinweis": "Erster Durchgang: was der Nutzer waehrend der Begehung aufgenommen hat. Drei Positionen, bewusst unterschiedlich gut dokumentiert -- Kueche vollstaendig, Bad halb, Treppenhaus nur ein Foto.",
+  "notizen": [
+    {
+      "id": "N-001",
+      "art": "sprache",
+      "position": null,
+      "zeitpunkt": "2026-08-24T09:05:00",
+      "inhalt": "Begehung der Wohnung 3 im Obergeschoss. Anwesend waren Frau Keller als Eigentuemerin und ich als Aufnehmender."
+    },
+    {
+      "id": "N-002",
+      "art": "sprache",
+      "position": "Kueche / Fenster",
+      "zeitpunkt": "2026-08-24T09:14:00",
+      "inhalt": "Das Kuechenfenster ist beschaedigt, die Fensterbank hat einen Riss ueber die ganze Breite. Der Rahmen ist zugig. Aufmass etwa 1,4 lfdm. Die Fensterbank sollte kurzfristig erneuert werden."
+    },
+    {
+      "id": "N-003",
+      "art": "foto",
+      "position": "Kueche / Fenster",
+      "zeitpunkt": "2026-08-24T09:15:00",
+      "inhalt": "Nahaufnahme der Fensterbank mit durchgehendem Riss im Lack, Holz darunter sichtbar.",
+      "meta": {"dateiname": "IMG_0431.jpg"}
+    },
+    {
+      "id": "N-004",
+      "art": "sprache",
+      "position": "Bad / Fliesenspiegel",
+      "zeitpunkt": "2026-08-24T09:26:00",
+      "inhalt": "Im Bad ist die Silikonfuge am Fliesenspiegel undicht und teilweise schwarz. Sollte abgedichtet werden."
+    },
+    {
+      "id": "N-005",
+      "art": "foto",
+      "position": "Treppenhaus / Handlauf",
+      "zeitpunkt": "2026-08-24T09:41:00",
+      "inhalt": "Handlauf im Treppenhaus, die Befestigung an der Wand wirkt lose, eine Schraube fehlt vermutlich.",
+      "meta": {"dateiname": "IMG_0433.jpg"}
+    }
+  ]
+}

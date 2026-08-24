@@ -384,8 +384,26 @@ agents/
   orchestrator/agent.py         Wires specialists via .as_tool(); owns the gate
 run_devui.py                    Registers all four agents in DevUI
 offline_demo.py                 Walk-through mechanics without Azure
+ki_protokoll/                   Separate track: KI-Protokoll button -> customer table
+ki_protokoll_demo.py            Its offline walk-through
 tests/                          81 tests; no credentials required
 ```
+
+---
+
+## Second track in this repo: KI-Protokoll
+
+`ki_protokoll/` is an unrelated feature sharing the repo: turning the notes,
+photos and voice notes of a site inspection into the **customer's protocol
+table**, with a to-do list for whatever could not be derived reliably. It runs
+offline and shares nothing with the vehicle demo except `common/llm_client.py`.
+
+```bash
+python ki_protokoll_demo.py --fliesstext
+python -m pytest tests/test_ki_protokoll.py -q
+```
+
+See [`ki_protokoll/README.md`](ki_protokoll/README.md) (German).
 
 ---
 

@@ -1,0 +1,35 @@
+{
+  "besichtigungId": "BES-2026-0087",
+  "hinweis": "Zweiter Durchgang: genau das, was der Nutzer nach der To-do-Liste aus Lauf 1 nachtraegt -- eine Textnotiz fuer die Kopfdaten, Sprachnotiz plus Foto fuers Bad, eine Sprachnotiz fuers Treppenhaus.",
+  "notizen": [
+    {
+      "id": "N-101",
+      "art": "text",
+      "position": null,
+      "zeitpunkt": "2026-08-24T18:02:00",
+      "inhalt": "Auftragsnummer 2026-118, Auftraggeber Hausverwaltung Brinkmann."
+    },
+    {
+      "id": "N-102",
+      "art": "sprache",
+      "position": "Bad / Fliesenspiegel",
+      "zeitpunkt": "2026-08-24T18:04:00",
+      "inhalt": "Die Fuge am Fliesenspiegel im Bad ist etwa 3,5 Laufmeter lang. Die Fuge muss kurzfristig erneuert und neu abgedichtet werden."
+    },
+    {
+      "id": "N-103",
+      "art": "foto",
+      "position": "Bad / Fliesenspiegel",
+      "zeitpunkt": "2026-08-24T18:05:00",
+      "inhalt": "Fliesenspiegel ueber der Badewanne, Silikonfuge dunkel verfaerbt und aufgerissen.",
+      "meta": {"dateiname": "IMG_0448.jpg"}
+    },
+    {
+      "id": "N-104",
+      "art": "sprache",
+      "position": "Treppenhaus / Handlauf",
+      "zeitpunkt": "2026-08-24T18:07:00",
+      "inhalt": "Der Handlauf im Treppenhaus ist an zwei Befestigungspunkten lose, eine Schraube fehlt. Das ist sicherheitsrelevant und muss sofort nachbefestigt werden. Betrifft 2 Stueck Befestigungen."
+    }
+  ]
+}
